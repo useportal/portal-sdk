@@ -68,6 +68,7 @@ export class ChannelHandleImpl implements ChannelHandle<unknown> {
       apiKey: deps.apiKey,
       token: deps.token,
       metadata: deps.options?.metadata,
+      history: deps.options?.history ?? 50,
     });
     this.#leak = { channelId: deps.channelId, count: 0 };
     leakRegistry?.register(this, this.#leak);
@@ -169,11 +170,11 @@ export class ChannelHandleImpl implements ChannelHandle<unknown> {
 
   // ── Write plane ───────────────────────────────────────────
 
-  send(_input: SendInput<unknown>): Promise<SendAck> {
-    return Promise.reject(new Error("send() is not implemented."));
+  send(input: SendInput<unknown>): Promise<SendAck> {
+    return this.#connection.send(input);
   }
   loadPrevious(): Promise<boolean> {
-    return Promise.reject(new Error("loadPrevious() is not implemented."));
+    return this.#connection.loadPrevious();
   }
   sendActivity(_kind: string): void {
     throw new Error("sendActivity() is not implemented.");

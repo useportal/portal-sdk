@@ -10,16 +10,23 @@ import {
   TokenExpiredError,
   type ChannelStatus,
 } from "../src/index.js";
+import {
+  resetHttpClientFactory,
+  setHttpClientFactory,
+} from "../src/http/factory.js";
 import { resetSocketFactory, setSocketFactory } from "../src/transport/factory.js";
+import { MockHttpClient } from "./mock-server/http.js";
 import { MockSocketServer } from "./mock-server/index.js";
 
 afterEach(() => {
   resetSocketFactory();
+  resetHttpClientFactory();
 });
 
 /** Acquire a channel wired to `server`, capturing the terminal error via on("status"). */
 function connect(server: MockSocketServer, token: string | (() => Promise<string>) = "jwt") {
   setSocketFactory(server.factory);
+  setHttpClientFactory(new MockHttpClient().factory);
   const channel = new Portal({ apiKey: "pk", token }).channel("room");
   let blockedError: PortalError | undefined;
   const statuses: ChannelStatus[] = [];

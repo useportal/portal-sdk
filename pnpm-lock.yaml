@@ -27,6 +27,9 @@ importers:
         specifier: 1.3.0
         version: 1.3.0(react@19.2.7)
     devDependencies:
+      '@types/node':
+        specifier: ^22.18.8
+        version: 22.20.1
       tsup:
         specifier: ^8.5.0
         version: 8.5.1(postcss@8.5.19)(typescript@5.9.3)

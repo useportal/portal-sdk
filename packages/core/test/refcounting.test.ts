@@ -2,13 +2,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Portal } from "../src/index.js";
 import { GRACE_MS } from "../src/channel.js";
+import {
+  resetHttpClientFactory,
+  setHttpClientFactory,
+} from "../src/http/factory.js";
 import { resetSocketFactory, setSocketFactory } from "../src/transport/factory.js";
+import { MockHttpClient } from "./mock-server/http.js";
 import { MockSocketServer } from "./mock-server/index.js";
 
 const config = { apiKey: "pk", token: "jwt" };
 
+beforeEach(() => {
+  setHttpClientFactory(new MockHttpClient().factory);
+});
+
 afterEach(() => {
   resetSocketFactory();
+  resetHttpClientFactory();
   vi.useRealTimers();
 });
 
