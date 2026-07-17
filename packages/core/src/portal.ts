@@ -9,7 +9,13 @@ import type {
 } from "./types.js";
 
 interface ChannelEntry {
-  handle: ChannelHandleImpl;
+  /**
+   * The handle is held weakly: while the caller (or React) keeps a reference it is
+   * returned for the same id, but once every reference is dropped it can be collected —
+   * which is what lets the dev-mode leak diagnostic fire on an acquired-and-forgotten
+   * handle even while the Portal itself lives on.
+   */
+  ref: WeakRef<ChannelHandleImpl>;
   /** The options the handle was created with, for the first-creation-wins warning. */
   optionsKey: string;
 }
@@ -32,6 +38,16 @@ export class Portal {
   readonly #config: PortalConfig;
   readonly #hosts: ResolvedHosts;
   readonly #channels = new Map<string, ChannelEntry>();
+  /** Evicts a dead registry entry once its handle has been collected. */
+  readonly #evictions =
+    typeof FinalizationRegistry !== "undefined"
+      ? new FinalizationRegistry<string>((channelId) => {
+          const entry = this.#channels.get(channelId);
+          if (entry !== undefined && entry.ref.deref() === undefined) {
+            this.#channels.delete(channelId);
+          }
+        })
+      : undefined;
 
   constructor(config: PortalConfig) {
     this.#config = config;
@@ -39,20 +55,22 @@ export class Portal {
   }
 
   /**
-   * Registry lookup-or-create: the same object for the same id. No network until
-   * `acquire()`. Options apply at first creation — a later call with different options
-   * returns the existing handle and ignores them (dev-mode warning; silent in production).
+   * Registry lookup-or-create: the same object for the same id, as long as a reference is
+   * still held. No network until `acquire()`. Options apply at first creation — a later
+   * call with different options returns the existing handle and ignores them (dev-mode
+   * warning; silent in production).
    */
   channel<M = unknown>(channelId: string, options?: ChannelOptions): ChannelHandle<M> {
-    const existing = this.#channels.get(channelId);
+    const existing = this.#channels.get(channelId)?.ref.deref();
     if (existing !== undefined) {
-      if (options !== undefined && optionsKey(options) !== existing.optionsKey) {
+      const entry = this.#channels.get(channelId);
+      if (options !== undefined && entry !== undefined && optionsKey(options) !== entry.optionsKey) {
         devWarn(
           `channel("${channelId}") was already created with different options; ` +
             `the original options are kept and these are ignored`,
         );
       }
-      return existing.handle as unknown as ChannelHandle<M>;
+      return existing as unknown as ChannelHandle<M>;
     }
 
     const handle = new ChannelHandleImpl({
@@ -62,7 +80,11 @@ export class Portal {
       token: this.#config.token,
       options,
     });
-    this.#channels.set(channelId, { handle, optionsKey: optionsKey(options) });
+    this.#channels.set(channelId, {
+      ref: new WeakRef(handle),
+      optionsKey: optionsKey(options),
+    });
+    this.#evictions?.register(handle, channelId);
     return handle as unknown as ChannelHandle<M>;
   }
 
