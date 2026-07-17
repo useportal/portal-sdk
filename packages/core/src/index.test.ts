@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { VERSION } from "./index.js";
+import { Portal } from "./index.js";
 
 describe("@portalsdk/core", () => {
-  it("exports a VERSION string", () => {
-    expect(VERSION).toBe("0.0.0");
+  it("constructs a Portal without touching the network", () => {
+    const portal = new Portal({ apiKey: "pk_test", token: "jwt" });
+    expect(portal).toBeInstanceOf(Portal);
   });
 });
