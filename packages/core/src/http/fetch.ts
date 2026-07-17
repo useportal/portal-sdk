@@ -66,6 +66,9 @@ export const createFetchHttpClient: HttpClientFactory = (
         method: "GET",
         headers: await authHeaders(),
       });
+      if (!response.ok) {
+        throw new Error(`history request failed with status ${response.status}`);
+      }
       return (await response.json()) as HistoryResponse;
     },
   };
