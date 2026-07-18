@@ -18,8 +18,12 @@ export interface PortalConfig {
   /**
    * Identifies the user. A callback is re-invoked on connect, reconnect, and expiry
    * (recommended); a plain string is used as-is (static or short-lived sessions).
+   *
+   * Optional: omit it for anonymous mode. With no token the SDK mints and manages its own
+   * anonymous credential on first use, keeping one stable anonymous identity across
+   * refreshes. Supply a token later (e.g. on login) with {@link Portal.setToken}.
    */
-  token: string | (() => Promise<string>);
+  token?: string | (() => Promise<string>);
   /**
    * Base URL overrides. Production hosts are baked in; set these to point at a local or
    * mock server. Primarily for development and testing.

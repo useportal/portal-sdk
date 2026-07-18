@@ -45,6 +45,25 @@ channel.release();
 one socket. In vanilla JS you pair `acquire()`/`release()` yourself (or use
 `using ch = portal.channel(id)` for scope-bound release); React does it for you.
 
+## Anonymous & auth
+
+`token` is optional. Omit it and the client runs anonymously: it mints and manages its own
+anonymous credential on first use, reuses it everywhere, and keeps one stable anonymous
+identity across refreshes — no token wrangling on your side.
+
+```ts
+const portal = new Portal({ apiKey: "pk_live_…" }); // anonymous
+
+// Later, on login — live channels and the inbox re-authenticate cleanly:
+portal.setToken(async () => fetchJwt());
+
+// On logout — back to anonymous:
+portal.setToken(undefined);
+```
+
+Anonymous users get `me.anon === true`, an empty inbox, and are refused from channels marked
+`anonymous: false` (`AnonymousNotAllowedError`).
+
 ## Channels
 
 A `ChannelHandle` exposes a reactive window and the operations over it:

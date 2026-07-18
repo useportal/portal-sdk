@@ -1,8 +1,8 @@
 import { ChannelConnection } from "./connection.js";
 import type { ResolvedHosts } from "./config.js";
+import type { Credentials } from "./credentials.js";
 import { devWarn } from "./env.js";
 import { NotYetSupportedError } from "./errors.js";
-import type { TokenSource } from "./token.js";
 import type {
   ChannelEvents,
   ChannelHandle,
@@ -26,7 +26,7 @@ export interface ChannelHandleDeps {
   channelId: string;
   hosts: ResolvedHosts;
   apiKey: string;
-  token: TokenSource;
+  credentials: Credentials;
   options: ChannelOptions | undefined;
 }
 
@@ -66,7 +66,7 @@ export class ChannelHandleImpl implements ChannelHandle<unknown> {
       channelId: deps.channelId,
       hosts: deps.hosts,
       apiKey: deps.apiKey,
-      token: deps.token,
+      credentials: deps.credentials,
       metadata: deps.options?.metadata,
       history: deps.options?.history ?? 50,
     });
@@ -104,6 +104,18 @@ export class ChannelHandleImpl implements ChannelHandle<unknown> {
 
   [Symbol.dispose](): void {
     this.release();
+  }
+
+  /**
+   * Re-authenticate a live connection after the identity changed (login/logout). Only a
+   * held connection reconnects — an idle handle simply picks up the new credential on its
+   * next acquire. The refcount is untouched; the socket is torn down and reopened so it
+   * re-auths cleanly with no stale-identity session lingering.
+   */
+  reauthenticate(): void {
+    if (this.#count === 0) return;
+    this.#connection.teardown();
+    this.#connection.connect();
   }
 
   // ── Store contract ────────────────────────────────────────

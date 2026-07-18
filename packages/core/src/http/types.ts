@@ -18,6 +18,11 @@ export type PublishOutcome =
   | { ok: true; ack: SendAckWire }
   | { ok: false; code: string; reason?: string };
 
+/** An anonymous-token mint either returns the signed token or is rejected with a code. */
+export type MintOutcome =
+  | { ok: true; token: string }
+  | { ok: false; code: string; reason?: string };
+
 /** History query — scroll-up paging (`before`/`limit`) or a gap-fill range (`from`/`to`). */
 export interface HistoryQuery {
   before?: number;
@@ -33,6 +38,11 @@ export interface HttpClient {
   history(channelId: string, query: HistoryQuery): Promise<HistoryResponse>;
   /** `GET /v1/channels/{id}/members` (§3.3), one page per cursor. */
   members(channelId: string, cursor?: string): Promise<MembersResponse>;
+  /**
+   * `POST /v1/tokens/anonymous`. Mints an anonymous session token, authenticated by the
+   * publishable `apiKey` alone (no bearer). Passing `anonId` re-mints for the same identity.
+   */
+  mintAnonymousToken(anonId?: string): Promise<MintOutcome>;
 }
 
 export interface HttpClientDeps {

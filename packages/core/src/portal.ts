@@ -1,8 +1,10 @@
 import { ChannelHandleImpl } from "./channel.js";
 import { resolveHosts, type ResolvedHosts } from "./config.js";
+import { Credentials } from "./credentials.js";
 import { devWarn } from "./env.js";
 import { InboxConnection } from "./inbox/connection.js";
 import { InboxHandleImpl } from "./inbox/handle.js";
+import type { TokenSource } from "./token.js";
 import type {
   ChannelHandle,
   ChannelOptions,
@@ -39,6 +41,7 @@ const optionsKey = (options: ChannelOptions | undefined): string =>
 export class Portal {
   readonly #config: PortalConfig;
   readonly #hosts: ResolvedHosts;
+  readonly #credentials: Credentials;
   readonly #channels = new Map<string, ChannelEntry>();
   #inbox: InboxHandleImpl | undefined;
   /** Evicts a dead registry entry once its handle has been collected. */
@@ -55,6 +58,11 @@ export class Portal {
   constructor(config: PortalConfig) {
     this.#config = config;
     this.#hosts = resolveHosts(config);
+    this.#credentials = new Credentials({
+      hosts: this.#hosts,
+      apiKey: config.apiKey,
+      token: config.token,
+    });
   }
 
   /**
@@ -80,7 +88,7 @@ export class Portal {
       channelId,
       hosts: this.#hosts,
       apiKey: this.#config.apiKey,
-      token: this.#config.token,
+      credentials: this.#credentials,
       options,
     });
     this.#channels.set(channelId, {
@@ -97,11 +105,24 @@ export class Portal {
       const connection = new InboxConnection({
         hosts: this.#hosts,
         apiKey: this.#config.apiKey,
-        token: this.#config.token,
+        credentials: this.#credentials,
       });
       this.#inbox = new InboxHandleImpl(connection);
       connection.connect();
     }
     return this.#inbox;
+  }
+
+  /**
+   * Replace the token source. Pass a string or callback to authenticate as that user (e.g.
+   * on login), or `undefined` to return to anonymous mode (the SDK mints and manages its own
+   * anonymous credential). Passing the same source is a no-op. When the identity changes,
+   * any live channels and the inbox re-authenticate so no stale-identity session lingers;
+   * idle handles pick up the new credential on their next use.
+   */
+  setToken(token: string | (() => string | Promise<string>) | undefined): void {
+    if (!this.#credentials.setToken(token as TokenSource | undefined)) return;
+    for (const entry of this.#channels.values()) entry.ref.deref()?.reauthenticate();
+    this.#inbox?.reauthenticate();
   }
 }

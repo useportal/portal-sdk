@@ -5,7 +5,9 @@ independently of the other `@portalsdk` packages.
 
 ## 0.1.0
 
-- `PortalProvider` — supplies the `Portal` client via context.
+- `PortalProvider` — supplies the `Portal` client via context, with an optional `token` prop
+  forwarded to `client.setToken` (login/logout); a fresh inline callback each render does not
+  reconnect.
 - `useChannel` — subscribes to a channel through `useSyncExternalStore`, drives the
   connection refcount from mount/unmount, and exposes the channel surface (messages, send,
   history, presence, activity, read state, status). Supports `readOn`

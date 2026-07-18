@@ -127,7 +127,14 @@ export class MockSocketServer {
     this.sockets.push(socket);
 
     const runAttempt = async (): Promise<void> => {
-      const url = await init.url();
+      let url: string;
+      try {
+        url = await init.url();
+      } catch {
+        // The URL provider failed (e.g. an anonymous-token mint was rejected). The connection
+        // surfaces that itself; there is nothing for the mock to script on this attempt.
+        return;
+      }
       if (socket.closed) return;
       this.urls.push(url);
       this.#attempt++;
