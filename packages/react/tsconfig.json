@@ -1,8 +1,8 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["ES2022", "DOM"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "ESNext.Disposable"],
     "jsx": "react-jsx"
   },
-  "include": ["src", "tsup.config.ts", "vitest.config.ts"]
+  "include": ["src", "test", "tsup.config.ts", "vitest.config.ts"]
 }
