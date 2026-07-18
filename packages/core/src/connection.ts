@@ -4,6 +4,7 @@ import {
   isChannelReady,
   isDirect,
   isError,
+  isPresence,
   isReassign,
   isRetract,
   parseChannelFrame,
@@ -12,6 +13,7 @@ import {
   type ChannelReadyFrame,
   type EphemeralFrame,
   type MetaFrame,
+  type PresenceFrame,
   type PublishBody,
   type WatermarkFrame,
   type WireMessage,
@@ -23,6 +25,7 @@ import { BlockedError, DegradedError, PortalError } from "./errors.js";
 import { getHttpClientFactory } from "./http/factory.js";
 import type { HttpClient } from "./http/types.js";
 import { MessageBuffer } from "./message-buffer.js";
+import { PresenceTracker } from "./presence.js";
 import { classifyRefusal } from "./refusal.js";
 import { Store } from "./store.js";
 import { isStaticToken, resolveToken, type TokenSource } from "./token.js";
@@ -81,6 +84,7 @@ export class ChannelConnection {
 
   readonly #deps: ConnectionDeps;
   readonly #buffer: MessageBuffer;
+  readonly #presence = new PresenceTracker();
   #socket: Socket | undefined;
   #http: HttpClient | undefined;
   #disposed = false;
@@ -143,6 +147,7 @@ export class ChannelConnection {
     this.#clearActivity();
     this.#activityThrottle.clear();
     this.#buffer.reset();
+    this.#presence.reset();
     this.store.set(idleSnapshot());
   }
 
@@ -195,12 +200,20 @@ export class ChannelConnection {
     if (isRetract(frame)) return this.#onRetract(frame.id, frame.seq);
     if (isError(frame)) return this.#emitError(this.#inSessionError(frame.code, frame.reason));
     if (isActivity(frame)) return this.#onActivity(frame.userId, frame.kind, frame.since);
+    if (isPresence(frame)) return this.#onPresence(frame);
     if (isReassign(frame)) {
       this.#leaf = frame.leaf;
       this.#socket?.reconnect();
       return;
     }
-    // presence / pong: parsed and not modeled here.
+    // pong: keepalive, not modeled.
+  }
+
+  #onPresence(frame: PresenceFrame): void {
+    this.#presence.applyDelta(frame);
+    this.#publishState();
+    const presence = this.#presence.current();
+    if (presence !== undefined) this.events.emit("presence", presence);
   }
 
   #onReady(frame: ChannelReadyFrame): void {
@@ -214,6 +227,7 @@ export class ChannelConnection {
     this.#buffer.setBaseline(frame.seq);
     // Watermark defaults to the head (nothing unread) when the server omits it.
     this.#buffer.setWatermark(frame.watermark ?? frame.seq);
+    this.#presence.seed(frame.presence);
 
     // Reconnect reconciliation: anything persisted between what we held and the new head
     // was missed and must be range-fetched — never assume the replay covered it.
@@ -237,7 +251,10 @@ export class ChannelConnection {
       messages: this.#buffer.messages(),
       hasPrevious: this.#buffer.hasPrevious(),
       unread: this.#buffer.channelUnread(),
+      presence: this.#presence.current(),
     }));
+    const presence = this.#presence.current();
+    if (presence !== undefined) this.events.emit("presence", presence);
     this.events.emit("status", "ready");
   }
 
@@ -538,6 +555,7 @@ export class ChannelConnection {
       isLoadingPrevious: this.#loadingPrevious,
       unread: this.#buffer.channelUnread(),
       activity: [...this.#activity.values()].map((a) => a.entry),
+      presence: this.#presence.current(),
     }));
   }
 

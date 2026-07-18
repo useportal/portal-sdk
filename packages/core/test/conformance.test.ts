@@ -6,6 +6,7 @@ import {
   isChannelReady,
   isInboxCounter,
   isInboxEntry,
+  isPresence,
   isRetract,
   type ChannelServerFrame,
   type InboxEntryWire,
@@ -97,6 +98,24 @@ suite("conformance (recorded fixture)", () => {
       const got = channel.messages.find((m) => m.id === mentioned.id);
       expect(got?.mentions).toEqual(mentioned.mentions);
     }
+
+    // Presence end state, folded from the recorded snapshot + detailed deltas.
+    const roster = new Map<string, unknown>();
+    let expectedCount = 0;
+    if (ready?.presence.mode === "detailed") {
+      for (const p of ready.presence.participants) roster.set(p.id, p);
+      expectedCount = ready.presence.count;
+    }
+    for (const frame of frames.filter(isPresence)) {
+      if (frame.mode !== "detailed") continue;
+      for (const p of frame.joined) roster.set(p.id, p);
+      for (const id of frame.left) roster.delete(id);
+      expectedCount = frame.count;
+    }
+    expect(channel.presence?.kind).toBe("detailed");
+    const presence = channel.presence as { participants: { id: string }[]; count: number };
+    expect(presence.participants.map((p) => p.id)).toEqual([...roster.keys()]);
+    expect(presence.count).toBe(expectedCount);
   });
 
   it("inbox: reproduces the recorded end state", async () => {
