@@ -11,10 +11,12 @@ import {
   type InboxItemReadFrame,
   type InboxReadAllFrame,
   type InboxReadFrame,
+  type PingFrame,
 } from "@portalsdk/wire-protocol";
 
 import type { ResolvedHosts } from "../config.js";
 import { Emitter } from "../emitter.js";
+import { Keepalive } from "../keepalive.js";
 import { classifyRefusal } from "../refusal.js";
 import { Store } from "../store.js";
 import { isStaticToken, resolveToken, type TokenSource } from "../token.js";
@@ -77,6 +79,10 @@ export class InboxConnection {
   readonly #entries = new Map<string, InboxEntryWire>();
   readonly #items = new Map<string, InboxItemWire>();
   #counter = 0;
+  readonly #keepalive = new Keepalive(() => {
+    const ping: PingFrame = { t: "ping" };
+    this.#socket?.send(serializeFrame(ping));
+  });
 
   constructor(deps: InboxConnectionDeps) {
     this.#deps = deps;
@@ -93,6 +99,7 @@ export class InboxConnection {
 
   teardown(): void {
     this.#disposed = true;
+    this.#keepalive.stop();
     this.#socket?.close();
     this.#socket = undefined;
     this.#entries.clear();
@@ -117,6 +124,7 @@ export class InboxConnection {
     if (this.#disposed) return;
     switch (event.type) {
       case "open":
+        this.#keepalive.start();
         return;
       case "message":
         this.#onMessage(event.data);
@@ -125,6 +133,7 @@ export class InboxConnection {
         this.#onRefused(event.code, event.reason);
         return;
       case "closed":
+        this.#keepalive.stop();
         if (!this.#synthesized) this.#setStatus("reconnecting");
         return;
       case "error":
@@ -193,12 +202,14 @@ export class InboxConnection {
     // no terminal state and no error event (§5), so this cannot be surfaced through the inbox
     // itself — in a typical app it surfaces on the channel socket, which shares these
     // credentials. SPEC/limitation: an inbox-only app cannot observe a fatal inbox refusal.
+    this.#keepalive.stop();
     this.#socket?.close();
   }
 
   /** Replace the store with a permanently-empty, ready inbox for an anonymous token. */
   #synthesize(): void {
     this.#synthesized = true;
+    this.#keepalive.stop();
     this.#socket?.close();
     this.#socket = undefined;
     this.store.set(emptyInbox("ready"));
