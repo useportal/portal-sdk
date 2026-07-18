@@ -40,7 +40,11 @@ const channelFrames: Record<string, ChannelServerFrame> = {
     me: { id: "u_1", anon: false, claims: {}, capabilities: { publish: true } },
     seq: 4812,
     leaf: "leaf_0",
-    presence: { mode: "detailed", participants: [{ userId: "u_1", claims: {} }], count: 1 },
+    presence: {
+      mode: "detailed",
+      participants: [{ id: "u_1", anon: false, username: "ada" }],
+      count: 1,
+    },
     watermark: 4790,
     ext: { ns: {} },
     bindings: { "ns.": "ws" },
@@ -50,8 +54,8 @@ const channelFrames: Record<string, ChannelServerFrame> = {
   "presence:detailed": {
     t: "presence",
     mode: "detailed",
-    joined: [{ userId: "u_2", claims: { role: "member" } }],
-    left: [],
+    joined: [{ id: "u_2", anon: false }],
+    left: ["u_3"],
     count: 214,
   },
   "presence:aggregate": { t: "presence", mode: "aggregate", count: 9412, recent: [] },

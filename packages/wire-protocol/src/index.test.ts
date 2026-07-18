@@ -17,6 +17,7 @@ describe("constants", () => {
     expect(UPGRADE_PARAMS).toStrictEqual({
       version: "v",
       token: "token",
+      key: "key",
       leaf: "leaf",
       meta: "meta",
       last: "last",

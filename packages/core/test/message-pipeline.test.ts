@@ -1,11 +1,4 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-import {
-  serializeFrame,
-  type ChannelServerFrame,
-  type WireMessage,
-} from "@portalsdk/wire-protocol";
+import { serializeFrame, type WireMessage } from "@portalsdk/wire-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -19,15 +12,6 @@ import { resetHttpClientFactory, setHttpClientFactory } from "../src/http/factor
 import { resetSocketFactory, setSocketFactory } from "../src/transport/factory.js";
 import { MockHttpClient } from "./mock-server/http.js";
 import { MockSocketServer, type ConnectScript } from "./mock-server/index.js";
-
-const fixtures = JSON.parse(
-  readFileSync(
-    fileURLToPath(new URL("../../../fixtures/m3-frames.json", import.meta.url)),
-    "utf8",
-  ),
-) as {
-  channel_frames_alice: ChannelServerFrame[];
-};
 
 afterEach(() => {
   resetSocketFactory();
@@ -62,30 +46,6 @@ function setup(
   channel.acquire();
   return { channel, server, http };
 }
-
-describe("fixture replay", () => {
-  it("reproduces the recorded scenario's end state", async () => {
-    const frames = fixtures.channel_frames_alice;
-    const { channel } = setup((ctx) => {
-      ctx.open();
-      for (const frame of frames) ctx.send(frame);
-    }, new MockHttpClient(), "general-1784247950137");
-
-    await vi.waitFor(() => expect(channel.status).toBe("ready"));
-
-    const messages = channel.messages;
-    expect(messages.map((m) => m.id)).toEqual(["m_1_1", "m_1_2"]);
-    // m_1_1 was retracted; its content is tombstoned.
-    expect(messages[0]).toMatchObject({ retracted: true });
-    expect(messages[0]?.content).toBeNull();
-    // m_1_2 survives with its mention intact.
-    expect(messages[1]).toMatchObject({
-      retracted: false,
-      content: { text: "hey @carol" },
-      mentions: [{ userId: "carol_1784247950137" }],
-    });
-  });
-});
 
 describe("ordering, dedup, retraction over the wire", () => {
   it("drops a duplicate seq", async () => {

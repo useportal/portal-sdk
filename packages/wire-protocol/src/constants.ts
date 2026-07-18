@@ -11,7 +11,8 @@ export const PROTOCOL_VERSION = 1;
  * string literals, so a rename is a compile error rather than a silent 4xx.
  *
  * - `version` — required on every upgrade; unknown → 426.
- * - `token` — the signed JWT. Identifies the user; the apiKey is resolved from it.
+ * - `token` — the signed JWT. Identifies the user.
+ * - `key` — the publishable apiKey, identifying the app (§1 credential transport).
  * - `leaf` — opaque reconnect token; echo back what `ready` gave you, unchanged.
  * - `meta` — initial presence metadata, base64 JSON (standard channels; ≤1KB decoded).
  * - `last` — highest contiguous seq held, sent on reconnect to request replay (§1.4).
@@ -19,6 +20,7 @@ export const PROTOCOL_VERSION = 1;
 export const UPGRADE_PARAMS = {
   version: "v",
   token: "token",
+  key: "key",
   leaf: "leaf",
   meta: "meta",
   last: "last",

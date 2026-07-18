@@ -107,7 +107,11 @@ const isMeInfo = (v: unknown): v is MeInfo =>
   isCapabilities(v["capabilities"]);
 
 const isParticipant = (v: unknown): v is WirePresenceParticipant =>
-  isRec(v) && isStr(v["userId"]) && isRec(v["claims"]);
+  isRec(v) &&
+  isStr(v["id"]) &&
+  isBool(v["anon"]) &&
+  opt(v["username"], isStr) &&
+  opt(v["metadata"], isRec);
 
 const isReadyPresence = (v: unknown): v is ReadyPresence => {
   if (!isRec(v)) return false;
@@ -169,7 +173,7 @@ const CHANNEL_SERVER_FRAMES: Record<ChannelServerFrame["t"], Validator> = {
     if (v["mode"] === "detailed") {
       return (
         arrayOf(v["joined"], isParticipant) &&
-        arrayOf(v["left"], isParticipant) &&
+        arrayOf(v["left"], isStr) &&
         isNum(v["count"])
       );
     }

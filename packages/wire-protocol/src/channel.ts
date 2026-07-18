@@ -47,18 +47,17 @@ export type MeInfo = {
 };
 
 /**
- * A participant as it appears **on the wire** (§1.2 snapshot, §2.1 deltas).
+ * A participant as it appears **on the wire** (§1.2 snapshot, §2.1 `joined` deltas).
  *
- * SPEC: provisional. `{ userId, claims }` is what the current fixtures prove the wire
- * carries (`channel_ready` presence, and the `presence` frame's `joined`), so it is what
- * this type says — the type follows recorded evidence, never an anticipated change.
- *
- * This shape may change in a future version of the package; treat `claims` as unstable
- * and do not build against it.
+ * `username` is present when the participant has one; `metadata` is the session presence
+ * metadata (`?meta=` / a `meta` frame). This carries no `claims` — the token's claim bag is
+ * the connected user's own (`me.claims` in `ready`), never another participant's.
  */
 export type WirePresenceParticipant = {
-  userId: string;
-  claims: Record<string, unknown>;
+  id: string;
+  anon: boolean;
+  username?: string;
+  metadata?: Record<string, unknown>;
 };
 
 /** Presence snapshot on a standard channel, carried by `ready` (§1.2). */
@@ -150,15 +149,14 @@ export type RetractFrame = {
 /**
  * Presence delta on a standard channel (§2.1).
  *
- * SPEC: §2.1 elides the `joined`/`left` element shapes as `[...]`. The fixture proves
- * `joined` carries {@link WirePresenceParticipant}; its `left` is empty, so `left`'s
- * element shape is assumed symmetric and remains **unverified**.
+ * `joined` carries full participants; `left` carries bare participant ids (a departing
+ * participant is identified, not re-described).
  */
 export type DetailedPresenceFrame = {
   t: "presence";
   mode: "detailed";
   joined: WirePresenceParticipant[];
-  left: WirePresenceParticipant[];
+  left: string[];
   count: number;
 };
 
