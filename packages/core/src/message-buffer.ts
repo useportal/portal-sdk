@@ -42,6 +42,10 @@ export class MessageBuffer {
    * from the `ready` head; the live stream begins at `contiguous + 1`.
    */
   #contiguous: number | undefined;
+  /** Latest seq known for the channel (the head), independent of what is loaded. */
+  #head: number | undefined;
+  /** My read position; `unread` counts what lies beyond it. */
+  #watermark: number | undefined;
   #hasPrevious = true;
 
   constructor(channelId: string) {
@@ -54,10 +58,27 @@ export class MessageBuffer {
 
   /** Anchor the live stream and gap baseline to a `ready` snapshot's head. */
   setBaseline(seq: number): void {
+    this.#raiseHead(seq);
     if (this.#contiguous === undefined || seq > this.#contiguous) {
       this.#contiguous = seq;
       this.#advanceContiguous();
     }
+  }
+
+  /** Set my read position (from `ready.watermark`, or advanced by `markAsRead`). */
+  setWatermark(seq: number): void {
+    this.#watermark = seq;
+  }
+
+  /** The head seq — what `markAsRead` advances the watermark to. */
+  headSeq(): number | undefined {
+    return this.#head;
+  }
+
+  /** Count of unread messages: how far the head runs beyond the watermark. */
+  channelUnread(): number {
+    if (this.#head === undefined || this.#watermark === undefined) return 0;
+    return Math.max(0, this.#head - this.#watermark);
   }
 
   /** The `last=` reconnect value: highest contiguous seq held (or the baseline). */
@@ -165,6 +186,8 @@ export class MessageBuffer {
     this.#optimistic.length = 0;
     this.#me = undefined;
     this.#contiguous = undefined;
+    this.#head = undefined;
+    this.#watermark = undefined;
     this.#hasPrevious = true;
   }
 
@@ -187,7 +210,12 @@ export class MessageBuffer {
     const stored = this.#pendingRetracts.has(seq) ? this.#tombstone(msg) : msg;
     this.#pendingRetracts.delete(seq);
     this.#persistent.set(seq, stored);
+    this.#raiseHead(seq);
     return stored;
+  }
+
+  #raiseHead(seq: number): void {
+    if (this.#head === undefined || seq > this.#head) this.#head = seq;
   }
 
   #tombstone(msg: WireMessage): WireMessage {
@@ -231,9 +259,14 @@ export class MessageBuffer {
       ...(wire.mentions !== undefined ? { mentions: wire.mentions } : {}),
       retracted: wire.retracted,
       ephemeral: wire.ephemeral,
-      unread: false,
+      unread: this.#isUnread(wire.seq),
       status: "sent",
     };
+  }
+
+  /** A persistent message is unread when its seq lies beyond my watermark. */
+  #isUnread(seq: number | null): boolean {
+    return seq !== null && this.#watermark !== undefined && seq > this.#watermark;
   }
 
   #optimisticToPublic(optimistic: OptimisticMessage): Message {

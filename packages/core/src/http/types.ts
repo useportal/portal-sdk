@@ -1,5 +1,6 @@
 import type {
   HistoryResponse,
+  MembersResponse,
   PublishBody,
   SendAckWire,
 } from "@portalsdk/wire-protocol";
@@ -30,6 +31,8 @@ export interface HttpClient {
   publish(channelId: string, body: PublishBody): Promise<PublishOutcome>;
   /** `GET /v1/channels/{id}/history` (§3.2). */
   history(channelId: string, query: HistoryQuery): Promise<HistoryResponse>;
+  /** `GET /v1/channels/{id}/members` (§3.3), one page per cursor. */
+  members(channelId: string, cursor?: string): Promise<MembersResponse>;
 }
 
 export interface HttpClientDeps {
