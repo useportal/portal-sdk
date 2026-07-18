@@ -20,9 +20,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm -r typecheck
-
+      # Build first: each package consumes the built type declarations of its workspace
+      # dependencies (e.g. core imports @portalsdk/wire-protocol's dist types), so the
+      # dependency's dist must exist before typecheck runs.
       - run: pnpm -r build
+
+      - run: pnpm -r typecheck
 
       # ──────────────────────────────────────────────────────────────────────
       # Private conformance fixture (STUB — to be wired up).
