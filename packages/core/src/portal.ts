@@ -1,6 +1,8 @@
 import { ChannelHandleImpl } from "./channel.js";
 import { resolveHosts, type ResolvedHosts } from "./config.js";
 import { devWarn } from "./env.js";
+import { InboxConnection } from "./inbox/connection.js";
+import { InboxHandleImpl } from "./inbox/handle.js";
 import type {
   ChannelHandle,
   ChannelOptions,
@@ -38,6 +40,7 @@ export class Portal {
   readonly #config: PortalConfig;
   readonly #hosts: ResolvedHosts;
   readonly #channels = new Map<string, ChannelEntry>();
+  #inbox: InboxHandleImpl | undefined;
   /** Evicts a dead registry entry once its handle has been collected. */
   readonly #evictions =
     typeof FinalizationRegistry !== "undefined"
@@ -90,6 +93,15 @@ export class Portal {
 
   /** Lazy singleton — created and subscribed on first use, never at construction. */
   inbox(): InboxHandle {
-    throw new Error("inbox() is not implemented.");
+    if (this.#inbox === undefined) {
+      const connection = new InboxConnection({
+        hosts: this.#hosts,
+        apiKey: this.#config.apiKey,
+        token: this.#config.token,
+      });
+      this.#inbox = new InboxHandleImpl(connection);
+      connection.connect();
+    }
+    return this.#inbox;
   }
 }
