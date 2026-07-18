@@ -171,6 +171,11 @@ export class MessageBuffer {
     };
     this.#store(wire);
     this.#advanceContiguous();
+    // Posting advances my own read position, exactly as the server does atomically on the
+    // write (§5): my own message must never count as unread to me, on any device.
+    if (this.#watermark === undefined || ack.seq > this.#watermark) {
+      this.#watermark = ack.seq;
+    }
   }
 
   /** Roll an optimistic send back out of the window (a rejected publish). */

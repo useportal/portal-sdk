@@ -63,6 +63,18 @@ describe("read state", () => {
     const watermark = server.socket?.received.find((f) => f?.t === "watermark");
     expect(watermark).toMatchObject({ seq: 2 });
   });
+
+  it("does not inflate unread when the user posts their own message", async () => {
+    const http = new MockHttpClient({
+      onPublish: () => ({ ok: true, ack: { id: "m_own", seq: 1, timestamp: 0 } }),
+    });
+    const { channel } = setup((ctx) => ctx.ready({ seq: 0, watermark: 0 }), http);
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+
+    await channel.send({ content: { text: "hello" } });
+    expect(channel.unread).toBe(0);
+    expect(channel.messages.find((m) => m.id === "m_own")?.unread).toBe(false);
+  });
 });
 
 describe("activity", () => {
