@@ -1,0 +1,183 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { serializeFrame, type InboxServerFrame } from "@portalsdk/wire-protocol";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { Portal, type InboxHandle } from "../src/index.js";
+import { resetSocketFactory, setSocketFactory } from "../src/transport/factory.js";
+import { MockSocketServer, type ConnectScript } from "./mock-server/index.js";
+
+const fixtures = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("../../../fixtures/m3-frames.json", import.meta.url)),
+    "utf8",
+  ),
+) as { inbox_frames_alice: InboxServerFrame[] };
+
+afterEach(() => {
+  resetSocketFactory();
+});
+
+function setup(script: ConnectScript): { inbox: InboxHandle; server: MockSocketServer } {
+  const server = new MockSocketServer(script);
+  setSocketFactory(server.factory);
+  const inbox = new Portal({ apiKey: "pk", token: "jwt" }).inbox();
+  return { inbox, server };
+}
+
+describe("fixture replay", () => {
+  it("reproduces the recorded inbox scenario's end state", async () => {
+    const frames = fixtures.inbox_frames_alice;
+    const { inbox } = setup((ctx) => {
+      ctx.open();
+      for (const frame of frames) ctx.send(frame);
+    });
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    expect(inbox.channels).toHaveLength(2);
+    const general = inbox.channels.get("general-1784247950137");
+    expect(general?.unread).toBe(1);
+    expect(general?.latest?.text).toBe("hey @carol");
+    expect(inbox.counter).toBe(1);
+  });
+});
+
+describe("lazy singleton", () => {
+  it("returns the same handle and connects only on first use", () => {
+    const server = new MockSocketServer(() => {});
+    setSocketFactory(server.factory);
+    const portal = new Portal({ apiKey: "pk", token: "jwt" });
+    expect(server.sockets).toHaveLength(0);
+    const first = portal.inbox();
+    expect(server.sockets).toHaveLength(1);
+    expect(portal.inbox()).toBe(first);
+  });
+});
+
+describe("items", () => {
+  it("stores an arriving item and fires the item event", async () => {
+    const { inbox, server } = setup((ctx) => ctx.inboxReady());
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    let received: string | undefined;
+    inbox.on("item", (item) => {
+      received = item.id;
+    });
+    server.socket?.emit({
+      type: "message",
+      data: serializeFrame({
+        t: "item",
+        item: { id: "evt_1", type: "mention", data: { x: 1 }, channelId: "c1", at: 5, read: false },
+      }),
+    });
+
+    expect(inbox.items.map((i) => i.id)).toEqual(["evt_1"]);
+    expect(received).toBe("evt_1");
+  });
+});
+
+describe("read models", () => {
+  const ready: ConnectScript = (ctx) =>
+    ctx.inboxReady({
+      entries: [{ id: "c1", unread: 3, muted: false, at: 2 }],
+      items: [{ id: "i1", type: "mention", data: {}, channelId: "c1", at: 1, read: false }],
+      counter: 3,
+    });
+
+  it("advances an entry position with a read frame (inbox, not the channel watermark)", async () => {
+    const { inbox, server } = setup(ready);
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    inbox.channels.get("c1")?.markAsRead();
+
+    const frame = server.socket?.receivedInbox.find((f) => f?.t === "read");
+    expect(frame).toMatchObject({ channelId: "c1" });
+    // Independent read model: this is an inbox read, never a channel watermark.
+    expect(server.socket?.receivedInbox.some((f) => (f as { t: string })?.t === "watermark")).toBe(
+      false,
+    );
+    expect(inbox.channels.get("c1")?.unread).toBe(0);
+  });
+
+  it("flips a single item with an item.read frame", async () => {
+    const { inbox, server } = setup(ready);
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    inbox.items[0]?.markAsRead();
+
+    expect(server.socket?.receivedInbox.find((f) => f?.t === "item.read")).toMatchObject({
+      id: "i1",
+    });
+    expect(inbox.items[0]?.read).toBe(true);
+  });
+
+  it("marks everything read with a global read.all frame", async () => {
+    const { inbox, server } = setup(ready);
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    inbox.markAllRead();
+
+    expect(server.socket?.receivedInbox.some((f) => f?.t === "read.all")).toBe(true);
+    expect(inbox.items.every((i) => i.read)).toBe(true);
+  });
+
+  it("mutes a channel with a mute frame and optimistic state", async () => {
+    const { inbox, server } = setup(ready);
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    inbox.channels.get("c1")?.mute();
+
+    expect(server.socket?.receivedInbox.find((f) => f?.t === "mute")).toMatchObject({
+      channelId: "c1",
+      muted: true,
+    });
+    expect(inbox.channels.get("c1")?.muted).toBe(true);
+  });
+});
+
+describe("views", () => {
+  const ready: ConnectScript = (ctx) =>
+    ctx.inboxReady({
+      entries: [
+        { id: "c1", unread: 1, muted: false, at: 2 },
+        { id: "c2", unread: 0, muted: true, at: 1 },
+      ],
+      items: [
+        { id: "i1", type: "mention", data: {}, channelId: "c1", at: 2, read: false },
+        { id: "i2", type: "ticket.assigned", data: {}, channelId: "c2", at: 1, read: true },
+      ],
+      counter: 1,
+    });
+
+  it("filters the item feed by where and counts unseen", async () => {
+    const { inbox } = setup(ready);
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    const view = inbox.view({ where: { type: { eq: "mention" } } });
+    expect(view.items.map((i) => i.id)).toEqual(["i1"]);
+    expect(view.unseen).toBe(1);
+  });
+
+  it("scopes to a channel but .get still hits the full registry", async () => {
+    const { inbox } = setup(ready);
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    const view = inbox.view({ channelId: "c1" });
+    expect(view.items.map((i) => i.id)).toEqual(["i1"]);
+    expect(view.channels.map((c) => c.id)).toEqual(["c1"]);
+    // .get reaches outside the view's filter, into the full registry.
+    expect(view.channels.get("c2")?.id).toBe("c2");
+  });
+});
+
+describe("anonymous synthesis", () => {
+  it("swallows the anon refusal and synthesizes a permanently-empty ready store", async () => {
+    const { inbox } = setup((ctx) => ctx.refuse("anonymous_not_allowed"));
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    expect(inbox.channels).toHaveLength(0);
+    expect(inbox.items).toHaveLength(0);
+    expect(inbox.counter).toBe(0);
+  });
+});

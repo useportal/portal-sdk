@@ -1,9 +1,13 @@
 import {
   parseChannelClientFrame,
+  parseInboxClientFrame,
   serializeFrame,
   type ChannelReadyFrame,
   type ChannelServerFrame,
+  type InboxReadyFrame,
+  type InboxServerFrame,
   type ParsedChannelClientFrame,
+  type ParsedInboxClientFrame,
 } from "@portalsdk/wire-protocol";
 
 import type { Socket, SocketEvent, SocketFactory } from "../../src/transport/types.js";
@@ -29,10 +33,12 @@ export interface ConnectContext {
   readonly attempt: number;
   /** Emit `open` (upgrade succeeded, socket live). */
   open(): void;
-  /** Serialize and deliver a server→client frame. */
-  send(frame: ChannelServerFrame): void;
-  /** Convenience: `open()` then a `ready` frame, with sensible defaults. */
+  /** Serialize and deliver a server→client frame (channel or inbox family). */
+  send(frame: ChannelServerFrame | InboxServerFrame): void;
+  /** Convenience: `open()` then a channel `ready` frame, with sensible defaults. */
   ready(overrides?: Partial<ChannelReadyFrame>): void;
+  /** Convenience: `open()` then an inbox `ready` frame, with sensible defaults. */
+  inboxReady(overrides?: Partial<InboxReadyFrame>): void;
   /** Refuse the upgrade with a refusal code (the socket never opens). */
   refuse(code: string, reason?: string): void;
   /** Drop the socket as a transient close (the client will report `reconnecting`). */
@@ -80,9 +86,14 @@ export class MockSocket implements Socket {
     this.closed = true;
   }
 
-  /** Parsed client→server frames the client sent. */
+  /** Parsed client→server channel frames the client sent. */
   get received(): (ParsedChannelClientFrame | null)[] {
     return this.sent.map(parseChannelClientFrame);
+  }
+
+  /** Parsed client→server inbox frames the client sent. */
+  get receivedInbox(): (ParsedInboxClientFrame | null)[] {
+    return this.sent.map(parseInboxClientFrame);
   }
 
   /** @internal — push a socket event to the connection, unless already closed. */
@@ -142,6 +153,19 @@ export class MockSocketServer {
         socket.emit({
           type: "message",
           data: serializeFrame({ ...defaultReady(channelId), ...overrides }),
+        });
+      },
+      inboxReady: (overrides) => {
+        socket.emit({ type: "open" });
+        socket.emit({
+          type: "message",
+          data: serializeFrame({
+            t: "ready",
+            entries: [],
+            items: [],
+            counter: 0,
+            ...overrides,
+          }),
         });
       },
       refuse: (code, reason) =>

@@ -48,6 +48,22 @@ export function buildChannelUpgradeUrl(params: ChannelUpgradeParams): string {
   return url.toString();
 }
 
+export interface InboxUpgradeParams {
+  realtimeUrl: string;
+  token: string;
+  apiKey: string;
+}
+
+/** Build an inbox socket upgrade URL (§5). No `leaf`/`last`/`meta` — the inbox has no seq stream. */
+export function buildInboxUpgradeUrl(params: InboxUpgradeParams): string {
+  const url = new URL(`${params.realtimeUrl}/inbox`);
+  const q = url.searchParams;
+  q.set(UPGRADE_PARAMS.version, String(PROTOCOL_VERSION));
+  q.set(UPGRADE_PARAMS.token, params.token);
+  q.set(API_KEY_PARAM, params.apiKey);
+  return url.toString();
+}
+
 /**
  * Convert a `ws(s)://` upgrade URL to the `http(s)://` URL for the same endpoint.
  *
