@@ -1,6 +1,6 @@
 {
   "name": "@portalsdk/react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React bindings — hooks and providers wrapping the Portal core client.",
   "license": "MIT",
   "type": "module",
@@ -29,7 +29,8 @@
     "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "node ../../scripts/verify-publish-manifest.mjs"
   },
   "dependencies": {
     "@portalsdk/core": "workspace:^"

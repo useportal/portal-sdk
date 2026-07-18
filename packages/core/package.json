@@ -1,6 +1,6 @@
 {
   "name": "@portalsdk/core",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Transport-agnostic Portal client runtime, built on the wire protocol over a WebSocket.",
   "license": "MIT",
   "type": "module",
@@ -31,7 +31,8 @@
     "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "node ../../scripts/verify-publish-manifest.mjs"
   },
   "dependencies": {
     "@portalsdk/wire-protocol": "workspace:^",

@@ -31,7 +31,8 @@
     "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "node ../../scripts/verify-publish-manifest.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.18.8",
