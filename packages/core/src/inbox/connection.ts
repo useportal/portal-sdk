@@ -141,6 +141,8 @@ export class InboxConnection {
       for (const entry of frame.entries) this.#entries.set(entry.id, entry);
       for (const item of frame.items) this.#items.set(item.id, item);
       this.#counter = frame.counter;
+      // A healthy session regains its one token-refresh retry, so a later expiry is not fatal.
+      this.#tokenRetryUsed = false;
       this.#publishState("ready");
       return;
     }
@@ -174,9 +176,12 @@ export class InboxConnection {
       this.#socket?.reconnect();
       return;
     }
-    // The inbox status union has no terminal state (§5); stop retrying a hard refusal and
-    // leave the store as-is rather than inventing a `blocked` the contract does not define.
-    this.#socket?.close();
+    // The inbox status union has no terminal state and no error event (§5): a genuinely-fatal
+    // auth refusal also refuses every channel, where it surfaces (status "blocked" + error).
+    // So the inbox stays "reconnecting" and keeps retrying rather than closing — it recovers
+    // when the token rotates or the credentials become valid again, and never lies about
+    // its status or stalls silently.
+    this.#setStatus("reconnecting");
   }
 
   /** Replace the store with a permanently-empty, ready inbox for an anonymous token. */

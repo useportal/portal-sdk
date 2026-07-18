@@ -181,3 +181,30 @@ describe("anonymous synthesis", () => {
     expect(inbox.counter).toBe(0);
   });
 });
+
+describe("refusal resilience", () => {
+  it("regains its token-refresh budget after each successful ready", async () => {
+    let issued = 0;
+    const token = async () => `jwt_${++issued}`;
+    const server = new MockSocketServer((ctx) => {
+      // Expire on the 1st and 3rd upgrades; a fresh ready between them must restore the retry.
+      if (ctx.attempt === 1 || ctx.attempt === 3) ctx.refuse("token_expired");
+      else ctx.inboxReady();
+    });
+    setSocketFactory(server.factory);
+    const inbox = new Portal({ apiKey: "pk", token }).inbox();
+
+    await vi.waitFor(() => expect(inbox.status).toBe("ready")); // attempt 1 refused → 2 ready
+    expect(server.urls).toHaveLength(2);
+
+    // A later drop whose upgrade expires again must still get its own retry, not stall.
+    server.socket?.reconnect();
+    await vi.waitFor(() => expect(server.urls).toHaveLength(4)); // 3 refused → 4 ready
+    expect(inbox.status).toBe("ready");
+  });
+
+  it("keeps trying (reconnecting) after a hard refusal instead of stalling", async () => {
+    const { inbox } = setup((ctx) => ctx.refuse("invalid_api_key"));
+    await vi.waitFor(() => expect(inbox.status).toBe("reconnecting"));
+  });
+});
