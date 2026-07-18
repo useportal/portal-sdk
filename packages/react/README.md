@@ -59,6 +59,23 @@ function Badge() {
 }
 ```
 
+## `PortalProvider`
+
+Supplies the client to the hooks. It also accepts an optional `token` prop, forwarded to
+`client.setToken` — pass a string or callback to log a user in, `undefined` to return to
+anonymous mode. A fresh inline callback on every render does not reconnect; only a real
+change of value or kind does.
+
+```tsx
+// Anonymous until a token arrives; swapping it in/out logs the user in and out.
+<PortalProvider client={portal} token={session?.jwt}>
+  {children}
+</PortalProvider>
+```
+
+Omit the `token` prop entirely to leave the client's own credential (from `new Portal({ token })`
+or anonymous mode) untouched.
+
 ## `useChannel`
 
 ```ts

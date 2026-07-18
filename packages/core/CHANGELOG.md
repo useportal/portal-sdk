@@ -21,6 +21,11 @@ First functional release — the framework-agnostic Portal client.
 - **Inbox** — entries, targeted items, and the global counter; two read models; filtered
   views; anonymous synthesis.
 - **Errors** — the `PortalError` hierarchy; refusal → error-class mapping.
+- **Anonymous mode** — `token` is optional; with none, the client mints and manages its own
+  anonymous credential (one mint, reused everywhere, stable `anonId` across refreshes) and
+  never surfaces a `TokenExpiredError`.
+- **`setToken()`** — replace the token source at runtime (login/logout); a changed identity
+  re-authenticates live channels and the inbox, an unchanged one is a no-op.
 - Token lifecycle (refresh-once), reconnect with gap reconciliation, and a keepalive ping,
   over a wrapped `partysocket` that never appears in the public types.
 - Built on `@portalsdk/wire-protocol` ^0.3.0.

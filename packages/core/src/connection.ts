@@ -21,6 +21,7 @@ import {
 } from "@portalsdk/wire-protocol";
 
 import type { ResolvedHosts } from "./config.js";
+import type { Credentials } from "./credentials.js";
 import { Emitter } from "./emitter.js";
 import { BlockedError, DegradedError, PortalError } from "./errors.js";
 import { getHttpClientFactory } from "./http/factory.js";
@@ -30,7 +31,6 @@ import { MessageBuffer } from "./message-buffer.js";
 import { PresenceTracker } from "./presence.js";
 import { classifyRefusal } from "./refusal.js";
 import { Store } from "./store.js";
-import { isStaticToken, resolveToken, type TokenSource } from "./token.js";
 import { getSocketFactory } from "./transport/factory.js";
 import type { Socket, SocketEvent } from "./transport/types.js";
 import type {
@@ -68,7 +68,7 @@ export interface ConnectionDeps {
   channelId: string;
   hosts: ResolvedHosts;
   apiKey: string;
-  token: TokenSource;
+  credentials: Credentials;
   metadata: Record<string, unknown> | undefined;
   /** Initial backfill size, or "none" for a live-only start. */
   history: number | "none";
@@ -136,6 +136,20 @@ export class ChannelConnection {
     this.#setStatus("connecting");
     this.#socket = getSocketFactory()({ url: this.#buildUrl, onEvent: this.#onEvent });
     if (this.#deps.history !== "none") this.#backfill(this.#deps.history);
+    // Anonymous mode: the SDK owns the credential, so a mint failure has no other way to
+    // surface. Resolve eagerly and turn a failure into a terminal error. Fire-and-forget;
+    // on success the token is cached and the socket's own url() reuses it (one mint).
+    if (this.#deps.credentials.managed) {
+      void this.#deps.credentials.resolve().catch((cause: unknown) => {
+        if (!this.#disposed) {
+          this.#fail(
+            cause instanceof PortalError
+              ? cause
+              : new PortalError("mint_failed", "Failed to obtain an anonymous token."),
+          );
+        }
+      });
+    }
   }
 
   teardown(): void {
@@ -161,7 +175,7 @@ export class ChannelConnection {
   // ── URL construction ──────────────────────────────────────
 
   readonly #buildUrl = async (): Promise<string> => {
-    const token = await resolveToken(this.#deps.token);
+    const token = await this.#deps.credentials.resolve();
     return buildChannelUpgradeUrl({
       realtimeUrl: this.#deps.hosts.realtimeUrl,
       channelId: this.#deps.channelId,
@@ -289,7 +303,21 @@ export class ChannelConnection {
   #onRefused(code: string, reason?: string): void {
     const decision = classifyRefusal(code, reason);
     if (decision.kind === "token-expired") {
-      if (isStaticToken(this.#deps.token) || this.#tokenRetryUsed) {
+      const credentials = this.#deps.credentials;
+      if (credentials.managed) {
+        // The SDK owns the credential: re-mint (same anonId) and retry rather than surfacing
+        // a TokenExpiredError. Bounded to one re-mint between healthy sessions to avoid a
+        // tight loop; a still-failing session keeps reconnecting with backoff.
+        if (this.#tokenRetryUsed) {
+          this.#setStatus("reconnecting");
+          return;
+        }
+        this.#tokenRetryUsed = true;
+        credentials.invalidate();
+        this.#socket?.reconnect();
+        return;
+      }
+      if (credentials.userStatic || this.#tokenRetryUsed) {
         this.#fail(decision.error);
         return;
       }
@@ -546,7 +574,7 @@ export class ChannelConnection {
       this.#http = getHttpClientFactory()({
         apiUrl: this.#deps.hosts.apiUrl,
         apiKey: this.#deps.apiKey,
-        token: this.#deps.token,
+        token: this.#deps.credentials.resolve,
       });
     }
     return this.#http;

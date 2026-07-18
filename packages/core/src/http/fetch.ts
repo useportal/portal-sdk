@@ -11,6 +11,7 @@ import type {
   HttpClientDeps,
   HttpClientFactory,
   HistoryQuery,
+  MintOutcome,
   PublishOutcome,
 } from "./types.js";
 
@@ -86,6 +87,29 @@ export const createFetchHttpClient: HttpClientFactory = (
         throw new Error(`members request failed with status ${response.status}`);
       }
       return (await response.json()) as MembersResponse;
+    },
+
+    async mintAnonymousToken(anonId?: string): Promise<MintOutcome> {
+      // Authenticated by the publishable key only — there is no bearer token yet.
+      const response = await fetch(`${deps.apiUrl}/v1/tokens/anonymous`, {
+        method: "POST",
+        headers: { [API_KEY_HEADER]: deps.apiKey, "content-type": "application/json" },
+        body: JSON.stringify(anonId !== undefined ? { anonId } : {}),
+      });
+      if (response.ok) {
+        const { token } = (await response.json()) as { token: string };
+        return { ok: true, token };
+      }
+      let code = `http_${response.status}`;
+      let reason: string | undefined;
+      try {
+        const errorBody = (await response.json()) as { code?: string; reason?: string };
+        if (typeof errorBody.code === "string") code = errorBody.code;
+        if (typeof errorBody.reason === "string") reason = errorBody.reason;
+      } catch {
+        /* keep the status-derived code */
+      }
+      return reason === undefined ? { ok: false, code } : { ok: false, code, reason };
     },
   };
 };

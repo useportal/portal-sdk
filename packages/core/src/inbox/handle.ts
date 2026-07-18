@@ -133,6 +133,14 @@ export class InboxHandleImpl implements InboxHandle {
     this.#connection.markAllRead();
   }
 
+  /**
+   * Internal: re-authenticate the inbox after an identity change. Not part of the public
+   * {@link InboxHandle} contract — only the owning Portal calls it.
+   */
+  reauthenticate(): void {
+    this.#connection.reauthenticate();
+  }
+
   on<E extends keyof InboxEvents>(event: E, fn: InboxEvents[E]): Unsubscribe {
     return this.#connection.events.on(event, fn);
   }

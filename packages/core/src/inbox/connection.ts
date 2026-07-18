@@ -15,11 +15,11 @@ import {
 } from "@portalsdk/wire-protocol";
 
 import type { ResolvedHosts } from "../config.js";
+import type { Credentials } from "../credentials.js";
 import { Emitter } from "../emitter.js";
 import { Keepalive } from "../keepalive.js";
 import { classifyRefusal } from "../refusal.js";
 import { Store } from "../store.js";
-import { isStaticToken, resolveToken, type TokenSource } from "../token.js";
 import { getSocketFactory } from "../transport/factory.js";
 import type { Socket, SocketEvent } from "../transport/types.js";
 import type {
@@ -54,7 +54,7 @@ const byRecencyDesc = <T extends { at: number }>(a: T, b: T): number => b.at - a
 export interface InboxConnectionDeps {
   hosts: ResolvedHosts;
   apiKey: string;
-  token: TokenSource;
+  credentials: Credentials;
 }
 
 /**
@@ -109,8 +109,18 @@ export class InboxConnection {
     this.store.set(emptyInbox("connecting"));
   }
 
+  /**
+   * Re-authenticate after an identity change (login/logout): drop the current session and
+   * reconnect so the inbox reflects the new user — including re-synthesizing an empty inbox
+   * when the new identity is anonymous.
+   */
+  reauthenticate(): void {
+    this.teardown();
+    this.connect();
+  }
+
   readonly #buildUrl = async (): Promise<string> => {
-    const token = await resolveToken(this.#deps.token);
+    const token = await this.#deps.credentials.resolve();
     return buildInboxUpgradeUrl({
       realtimeUrl: this.#deps.hosts.realtimeUrl,
       token,
@@ -183,25 +193,28 @@ export class InboxConnection {
       return;
     }
     const decision = classifyRefusal(code, reason);
-    if (decision.kind === "token-expired" && !isStaticToken(this.#deps.token)) {
-      // A rotating callback token recovers: refresh once immediately, then let the transport
-      // keep retrying with backoff (the inbox singleton has no other recovery trigger). A
-      // token expiry is not terminal, so keeping the socket open is within the transport
-      // contract.
-      if (this.#tokenRetryUsed) {
-        this.#setStatus("reconnecting");
-      } else {
-        this.#tokenRetryUsed = true;
-        this.#socket?.reconnect();
+    if (decision.kind === "token-expired") {
+      const credentials = this.#deps.credentials;
+      // Anonymous mode: the SDK owns the credential — re-mint (same anonId) and retry.
+      // A rotating callback token likewise recovers: refresh once immediately. Either way,
+      // bound it to one retry and then fall back to backoff reconnection.
+      if (credentials.managed || !credentials.userStatic) {
+        if (this.#tokenRetryUsed) {
+          this.#setStatus("reconnecting");
+        } else {
+          this.#tokenRetryUsed = true;
+          if (credentials.managed) credentials.invalidate();
+          this.#socket?.reconnect();
+        }
+        return;
       }
-      return;
+      // A static string token cannot be re-resolved: fall through to terminal handling.
     }
     // Terminal and unrecoverable (bad key, banned, unsupported version, an invalid or
-    // static-expired token): the transport contract requires a terminal refusal to be
-    // closed, so stop reconnecting rather than hammering forever. The inbox status union has
-    // no terminal state and no error event (§5), so this cannot be surfaced through the inbox
-    // itself — in a typical app it surfaces on the channel socket, which shares these
-    // credentials. SPEC/limitation: an inbox-only app cannot observe a fatal inbox refusal.
+    // static-expired token). The transport keeps reconnecting until closed, so stop rather
+    // than hammering. The inbox status has no terminal value and no error event, so this is
+    // not surfaced through the inbox itself; in a typical app it surfaces on the channel
+    // socket, which shares these credentials. An inbox-only app cannot observe it.
     this.#keepalive.stop();
     this.#socket?.close();
   }
