@@ -3,6 +3,24 @@
 All notable changes to this package are documented here. This package is versioned
 independently of the other `@portalsdk` packages.
 
+## 0.3.0
+
+### Changed
+
+- **Presence participants are `{ id, anon, username?, metadata? }`** everywhere they appear
+  — the `ready` presence snapshot and the `presence` delta's `joined`. Presence frames carry
+  no `claims`; the token's claim bag remains the connected user's own (`me.claims` in
+  `ready`), never another participant's.
+- **A presence delta's `left` is a `string[]` of participant ids** — a departing participant
+  is identified, not re-described.
+- Presence parsing is strict against the shapes above; the provisional presence markers are
+  removed (the shapes are now evidence-backed).
+
+### Added
+
+- `key` in `UPGRADE_PARAMS` — the publishable apiKey query parameter on an upgrade (§1
+  credential transport), alongside `token`.
+
 ## 0.2.0
 
 ### Added

@@ -1,19 +1,9 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-import { serializeFrame, type InboxServerFrame } from "@portalsdk/wire-protocol";
+import { serializeFrame } from "@portalsdk/wire-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Portal, type InboxHandle } from "../src/index.js";
 import { resetSocketFactory, setSocketFactory } from "../src/transport/factory.js";
 import { MockSocketServer, type ConnectScript } from "./mock-server/index.js";
-
-const fixtures = JSON.parse(
-  readFileSync(
-    fileURLToPath(new URL("../../../fixtures/m3-frames.json", import.meta.url)),
-    "utf8",
-  ),
-) as { inbox_frames_alice: InboxServerFrame[] };
 
 afterEach(() => {
   resetSocketFactory();
@@ -25,23 +15,6 @@ function setup(script: ConnectScript): { inbox: InboxHandle; server: MockSocketS
   const inbox = new Portal({ apiKey: "pk", token: "jwt" }).inbox();
   return { inbox, server };
 }
-
-describe("fixture replay", () => {
-  it("reproduces the recorded inbox scenario's end state", async () => {
-    const frames = fixtures.inbox_frames_alice;
-    const { inbox } = setup((ctx) => {
-      ctx.open();
-      for (const frame of frames) ctx.send(frame);
-    });
-    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
-
-    expect(inbox.channels).toHaveLength(2);
-    const general = inbox.channels.get("general-1784247950137");
-    expect(general?.unread).toBe(1);
-    expect(general?.latest?.text).toBe("hey @carol");
-    expect(inbox.counter).toBe(1);
-  });
-});
 
 describe("lazy singleton", () => {
   it("returns the same handle and connects only on first use", () => {

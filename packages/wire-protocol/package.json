@@ -1,6 +1,6 @@
 {
   "name": "@portalsdk/wire-protocol",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Wire format types and codecs for the Portal protocol.",
   "license": "MIT",
   "type": "module",

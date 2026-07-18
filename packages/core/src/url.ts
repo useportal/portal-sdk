@@ -1,16 +1,5 @@
 import { PROTOCOL_VERSION, UPGRADE_PARAMS } from "@portalsdk/wire-protocol";
 
-/**
- * Query-parameter name carrying the publishable `apiKey` on an upgrade (§1, credential
- * transport). The HTTP counterpart is the `x-portal-key` header.
- *
- * SPEC: the wire protocol's `UPGRADE_PARAMS` does not include this key — §1.1 of the wire
- * doc says the apiKey is resolved from the token — but the client SDK contract (§1),
- * authoritative on the public surface, requires `?key={apiKey}` alongside `?token=`. This
- * literal covers that param; every wire-doc param uses `UPGRADE_PARAMS`.
- */
-const API_KEY_PARAM = "key";
-
 /** UTF-8-safe base64 of a JSON value, for the `meta` upgrade param (§1.1). */
 function toBase64Json(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -41,7 +30,7 @@ export function buildChannelUpgradeUrl(params: ChannelUpgradeParams): string {
   const q = url.searchParams;
   q.set(UPGRADE_PARAMS.version, String(PROTOCOL_VERSION));
   q.set(UPGRADE_PARAMS.token, token);
-  q.set(API_KEY_PARAM, apiKey);
+  q.set(UPGRADE_PARAMS.key, apiKey);
   if (leaf !== undefined) q.set(UPGRADE_PARAMS.leaf, leaf);
   if (meta !== undefined) q.set(UPGRADE_PARAMS.meta, toBase64Json(meta));
   if (last !== undefined) q.set(UPGRADE_PARAMS.last, String(last));
@@ -60,7 +49,7 @@ export function buildInboxUpgradeUrl(params: InboxUpgradeParams): string {
   const q = url.searchParams;
   q.set(UPGRADE_PARAMS.version, String(PROTOCOL_VERSION));
   q.set(UPGRADE_PARAMS.token, params.token);
-  q.set(API_KEY_PARAM, params.apiKey);
+  q.set(UPGRADE_PARAMS.key, params.apiKey);
   return url.toString();
 }
 
