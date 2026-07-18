@@ -3,6 +3,7 @@
 
 export { PortalProvider } from "./provider.js";
 export { useChannel } from "./use-channel.js";
+export { useInbox } from "./use-inbox.js";
 
 // `Me` and `PortalProviderProps` stay internal aliases — present in the emitted types as
 // local declarations, never on the export list.
