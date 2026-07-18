@@ -1,4 +1,5 @@
 import {
+  isActivity,
   isBatch,
   isChannelReady,
   isDirect,
@@ -7,9 +8,12 @@ import {
   isRetract,
   parseChannelFrame,
   serializeFrame,
+  type ActivityUpFrame,
   type ChannelReadyFrame,
   type EphemeralFrame,
+  type MetaFrame,
   type PublishBody,
+  type WatermarkFrame,
   type WireMessage,
 } from "@portalsdk/wire-protocol";
 
@@ -25,9 +29,11 @@ import { isStaticToken, resolveToken, type TokenSource } from "./token.js";
 import { getSocketFactory } from "./transport/factory.js";
 import type { Socket, SocketEvent } from "./transport/types.js";
 import type {
+  ActivityEntry,
   ChannelEvents,
   ChannelInfo,
   ChannelSnapshot,
+  MemberRow,
   SendAck,
   SendInput,
 } from "./types.js";
@@ -35,6 +41,10 @@ import { buildChannelUpgradeUrl } from "./url.js";
 
 /** Max client-side jitter before a gap-fill range fetch (implementation-notes). */
 const GAP_FILL_MAX_JITTER_MS = 2_000;
+/** Minimum spacing between outgoing activity signals of the same kind. */
+const ACTIVITY_THROTTLE_MS = 3_000;
+/** How long a peer's activity survives without a refresh. */
+const ACTIVITY_EXPIRY_MS = 5_000;
 
 /** The idle snapshot a channel starts (and returns) to. `hasPrevious` is optimistic. */
 const idleSnapshot = (): ChannelSnapshot => ({
@@ -83,16 +93,28 @@ export class ChannelConnection {
   #bindings: Record<string, string> | undefined;
   /** Namespaces whose extension is currently degraded (populated once degraded status lands). */
   readonly #degraded = new Set<string>();
+  /** Whether this connection may publish — drives the degraded-http fallback status. */
+  #canPublish = false;
+  /** Current presence metadata; re-sent on reconnect and replaced by `setMetadata`. */
+  #metadata: Record<string, unknown> | undefined;
 
   #clientTag = 0;
   #loadingPrevious = false;
   #loadPreviousInFlight: Promise<boolean> | undefined;
   /** In-flight gap-fill ranges, keyed `from-to`, to avoid duplicate fetches. */
   readonly #inflightGaps = new Set<string>();
+  /** Live peer activity, keyed `userId:kind`, each on its own absence-expiry timer. */
+  readonly #activity = new Map<
+    string,
+    { entry: ActivityEntry; timer: ReturnType<typeof setTimeout> }
+  >();
+  /** Last send time per activity kind, for client-side throttling. */
+  readonly #activityThrottle = new Map<string, number>();
 
   constructor(deps: ConnectionDeps) {
     this.#deps = deps;
     this.#buffer = new MessageBuffer(deps.channelId);
+    this.#metadata = deps.metadata;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────
@@ -113,9 +135,13 @@ export class ChannelConnection {
     this.#http = undefined;
     this.#leaf = undefined;
     this.#bindings = undefined;
+    this.#canPublish = false;
+    this.#metadata = this.#deps.metadata;
     this.#loadingPrevious = false;
     this.#loadPreviousInFlight = undefined;
     this.#inflightGaps.clear();
+    this.#clearActivity();
+    this.#activityThrottle.clear();
     this.#buffer.reset();
     this.store.set(idleSnapshot());
   }
@@ -130,7 +156,7 @@ export class ChannelConnection {
       token,
       apiKey: this.#deps.apiKey,
       leaf: this.#leaf,
-      meta: this.#deps.metadata,
+      meta: this.#metadata,
       last: this.#buffer.contiguousSeq(),
     });
   };
@@ -149,7 +175,11 @@ export class ChannelConnection {
         this.#onRefused(event.code, event.reason);
         return;
       case "closed":
-        if (this.#currentStatus() !== "blocked") this.#setStatus("reconnecting");
+        if (this.#currentStatus() !== "blocked") {
+          // A publish-capable connection can still speak over HTTP while the socket is
+          // down; incoming lags until reconnect gap-fill heals it.
+          this.#setStatus(this.#canPublish ? "degraded-http" : "reconnecting");
+        }
         return;
       case "error":
         return;
@@ -164,22 +194,26 @@ export class ChannelConnection {
     if (isDirect(frame)) return this.#deliver([frame.msg]);
     if (isRetract(frame)) return this.#onRetract(frame.id, frame.seq);
     if (isError(frame)) return this.#emitError(this.#inSessionError(frame.code, frame.reason));
+    if (isActivity(frame)) return this.#onActivity(frame.userId, frame.kind, frame.since);
     if (isReassign(frame)) {
       this.#leaf = frame.leaf;
       this.#socket?.reconnect();
       return;
     }
-    // presence / activity / pong: parsed and not modeled here.
+    // presence / pong: parsed and not modeled here.
   }
 
   #onReady(frame: ChannelReadyFrame): void {
     this.#leaf = frame.leaf;
     this.#bindings = frame.bindings;
+    this.#canPublish = frame.me.capabilities.publish === true;
     this.#tokenRetryUsed = false;
 
     const heldBefore = this.#buffer.contiguousSeq();
     this.#buffer.setMe(frame.me.id, frame.me.anon);
     this.#buffer.setBaseline(frame.seq);
+    // Watermark defaults to the head (nothing unread) when the server omits it.
+    this.#buffer.setWatermark(frame.watermark ?? frame.seq);
 
     // Reconnect reconciliation: anything persisted between what we held and the new head
     // was missed and must be range-fetched — never assume the replay covered it.
@@ -202,6 +236,7 @@ export class ChannelConnection {
       me,
       messages: this.#buffer.messages(),
       hasPrevious: this.#buffer.hasPrevious(),
+      unread: this.#buffer.channelUnread(),
     }));
     this.events.emit("status", "ready");
   }
@@ -302,6 +337,73 @@ export class ChannelConnection {
     const frame: EphemeralFrame = { t: "ephemeral", cl, type: type ?? "message", content };
     this.#socket?.send(serializeFrame(frame));
     return Promise.resolve({ id: cl, timestamp: Date.now() });
+  }
+
+  // ── Read state ────────────────────────────────────────────
+
+  /** Advance the channel watermark to the head, clearing `unread`. */
+  markAsRead(): void {
+    const head = this.#buffer.headSeq();
+    if (head === undefined) return;
+    this.#buffer.setWatermark(head);
+    const frame: WatermarkFrame = { t: "watermark", seq: head };
+    this.#socket?.send(serializeFrame(frame));
+    this.#publishState();
+  }
+
+  // ── Activity ──────────────────────────────────────────────
+
+  sendActivity(kind: string): void {
+    // No roster on a broadcast channel — there is no one to signal.
+    if (this.store.getSnapshot().info?.mode === "broadcast") return;
+    const now = Date.now();
+    const last = this.#activityThrottle.get(kind);
+    if (last !== undefined && now - last < ACTIVITY_THROTTLE_MS) return;
+    this.#activityThrottle.set(kind, now);
+    const frame: ActivityUpFrame = { t: "activity", kind };
+    this.#socket?.send(serializeFrame(frame));
+  }
+
+  #onActivity(userId: string, kind: string, since: number): void {
+    const key = `${userId}:${kind}`;
+    const existing = this.#activity.get(key);
+    if (existing !== undefined) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
+      this.#activity.delete(key);
+      this.#publishState();
+      this.events.emit("activity", this.store.getSnapshot().activity);
+    }, ACTIVITY_EXPIRY_MS);
+    this.#activity.set(key, { entry: { userId, kind, since }, timer });
+    this.#publishState();
+    this.events.emit("activity", this.store.getSnapshot().activity);
+  }
+
+  #clearActivity(): void {
+    for (const { timer } of this.#activity.values()) clearTimeout(timer);
+    this.#activity.clear();
+  }
+
+  // ── Presence metadata ─────────────────────────────────────
+
+  /** Replace this session's presence metadata; the server re-announces it via deltas. */
+  setMetadata(metadata: Record<string, unknown>): void {
+    this.#metadata = metadata;
+    const frame: MetaFrame = { t: "meta", metadata };
+    this.#socket?.send(serializeFrame(frame));
+  }
+
+  // ── Members ───────────────────────────────────────────────
+
+  /** Fetch the full member directory, following the pagination cursor. */
+  async members(): Promise<MemberRow[]> {
+    const rows: MemberRow[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.#httpClient().members(this.#deps.channelId, cursor);
+      rows.push(...page.members);
+      cursor = page.cursor;
+    } while (cursor !== undefined);
+    return rows;
   }
 
   // ── History ───────────────────────────────────────────────
@@ -434,6 +536,8 @@ export class ChannelConnection {
       messages: this.#buffer.messages(),
       hasPrevious: this.#buffer.hasPrevious(),
       isLoadingPrevious: this.#loadingPrevious,
+      unread: this.#buffer.channelUnread(),
+      activity: [...this.#activity.values()].map((a) => a.entry),
     }));
   }
 

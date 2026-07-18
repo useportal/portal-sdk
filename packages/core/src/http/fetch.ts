@@ -1,5 +1,6 @@
 import type {
   HistoryResponse,
+  MembersResponse,
   PublishBody,
   SendAckWire,
 } from "@portalsdk/wire-protocol";
@@ -70,6 +71,21 @@ export const createFetchHttpClient: HttpClientFactory = (
         throw new Error(`history request failed with status ${response.status}`);
       }
       return (await response.json()) as HistoryResponse;
+    },
+
+    async members(channelId: string, cursor?: string): Promise<MembersResponse> {
+      const url = new URL(
+        `${deps.apiUrl}/v1/channels/${encodeURIComponent(channelId)}/members`,
+      );
+      if (cursor !== undefined) url.searchParams.set("cursor", cursor);
+      const response = await fetch(url.toString(), {
+        method: "GET",
+        headers: await authHeaders(),
+      });
+      if (!response.ok) {
+        throw new Error(`members request failed with status ${response.status}`);
+      }
+      return (await response.json()) as MembersResponse;
     },
   };
 };

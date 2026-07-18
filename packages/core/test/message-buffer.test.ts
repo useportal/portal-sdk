@@ -138,4 +138,22 @@ describe("optimistic sends", () => {
     buffer.rollback("cl_1");
     expect(buffer.messages()).toHaveLength(0);
   });
+
+  it("does not count the sender's own acked message as unread", () => {
+    const buffer = make(0);
+    buffer.setWatermark(0);
+    buffer.addOptimistic({
+      tempId: "cl_1",
+      type: "message",
+      content: { text: "hi" },
+      to: undefined,
+      mentions: undefined,
+      timestamp: 5_000,
+    });
+    buffer.ack("cl_1", { id: "m_1", seq: 1, timestamp: 0 });
+
+    // Posting advances my read position, so my own message is never unread to me.
+    expect(buffer.channelUnread()).toBe(0);
+    expect(buffer.messages().find((m) => m.id === "m_1")?.unread).toBe(false);
+  });
 });

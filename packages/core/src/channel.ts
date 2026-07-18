@@ -176,19 +176,19 @@ export class ChannelHandleImpl implements ChannelHandle<unknown> {
   loadPrevious(): Promise<boolean> {
     return this.#connection.loadPrevious();
   }
-  sendActivity(_kind: string): void {
-    throw new Error("sendActivity() is not implemented.");
+  sendActivity(kind: string): void {
+    this.#connection.sendActivity(kind);
   }
   sendTyping(): void {
-    throw new Error("sendTyping() is not implemented.");
+    this.#connection.sendActivity("typing");
   }
   markAsRead(): void {
-    throw new Error("markAsRead() is not implemented.");
+    this.#connection.markAsRead();
   }
-  setMetadata(_metadata: Record<string, unknown>): void {
-    throw new Error("setMetadata() is not implemented.");
+  setMetadata(metadata: Record<string, unknown>): void {
+    this.#connection.setMetadata(metadata);
   }
   members(): Promise<MemberRow[]> {
-    return Promise.reject(new Error("members() is not implemented."));
+    return this.#connection.members();
   }
 }

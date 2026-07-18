@@ -1,4 +1,8 @@
-import type { HistoryResponse, PublishBody } from "@portalsdk/wire-protocol";
+import type {
+  HistoryResponse,
+  MembersResponse,
+  PublishBody,
+} from "@portalsdk/wire-protocol";
 
 import type {
   HttpClient,
@@ -10,6 +14,7 @@ import type {
 export interface MockHttpOptions {
   onPublish?: (channelId: string, body: PublishBody) => PublishOutcome;
   onHistory?: (channelId: string, query: HistoryQuery) => HistoryResponse;
+  onMembers?: (channelId: string, cursor: string | undefined) => MembersResponse;
 }
 
 /**
@@ -21,6 +26,7 @@ export interface MockHttpOptions {
 export class MockHttpClient implements HttpClient {
   readonly publishCalls: { channelId: string; body: PublishBody }[] = [];
   readonly historyCalls: { channelId: string; query: HistoryQuery }[] = [];
+  readonly memberCalls: { channelId: string; cursor: string | undefined }[] = [];
 
   readonly #options: MockHttpOptions;
 
@@ -42,6 +48,12 @@ export class MockHttpClient implements HttpClient {
   history(channelId: string, query: HistoryQuery): Promise<HistoryResponse> {
     this.historyCalls.push({ channelId, query });
     const page = this.#options.onHistory?.(channelId, query) ?? { msgs: [], hasMore: false };
+    return Promise.resolve(page);
+  }
+
+  members(channelId: string, cursor?: string): Promise<MembersResponse> {
+    this.memberCalls.push({ channelId, cursor });
+    const page = this.#options.onMembers?.(channelId, cursor) ?? { members: [] };
     return Promise.resolve(page);
   }
 

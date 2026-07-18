@@ -155,9 +155,11 @@ describe("status machine", () => {
     expect(channel.info).toEqual({ id: "room", mode: "standard" });
   });
 
-  it("reports reconnecting on a transient drop", async () => {
+  it("reports reconnecting on a transient drop (non-publisher)", async () => {
     const server = new MockSocketServer((ctx) => {
-      if (ctx.attempt === 1) ctx.ready();
+      if (ctx.attempt === 1) {
+        ctx.ready({ me: { id: "u_test", anon: false, claims: {}, capabilities: {} } });
+      }
     });
     const { channel } = connect(server);
     await vi.waitFor(() => expect(channel.status).toBe("ready"));
