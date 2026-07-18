@@ -13,6 +13,7 @@ import {
   type ChannelReadyFrame,
   type EphemeralFrame,
   type MetaFrame,
+  type PingFrame,
   type PresenceFrame,
   type PublishBody,
   type WatermarkFrame,
@@ -24,6 +25,7 @@ import { Emitter } from "./emitter.js";
 import { BlockedError, DegradedError, PortalError } from "./errors.js";
 import { getHttpClientFactory } from "./http/factory.js";
 import type { HttpClient } from "./http/types.js";
+import { Keepalive } from "./keepalive.js";
 import { MessageBuffer } from "./message-buffer.js";
 import { PresenceTracker } from "./presence.js";
 import { classifyRefusal } from "./refusal.js";
@@ -85,6 +87,10 @@ export class ChannelConnection {
   readonly #deps: ConnectionDeps;
   readonly #buffer: MessageBuffer;
   readonly #presence = new PresenceTracker();
+  readonly #keepalive = new Keepalive(() => {
+    const ping: PingFrame = { t: "ping" };
+    this.#socket?.send(serializeFrame(ping));
+  });
   #socket: Socket | undefined;
   #http: HttpClient | undefined;
   #disposed = false;
@@ -144,6 +150,7 @@ export class ChannelConnection {
     this.#loadingPrevious = false;
     this.#loadPreviousInFlight = undefined;
     this.#inflightGaps.clear();
+    this.#keepalive.stop();
     this.#clearActivity();
     this.#activityThrottle.clear();
     this.#buffer.reset();
@@ -172,6 +179,7 @@ export class ChannelConnection {
     if (this.#disposed) return;
     switch (event.type) {
       case "open":
+        this.#keepalive.start();
         return;
       case "message":
         this.#onMessage(event.data);
@@ -180,6 +188,7 @@ export class ChannelConnection {
         this.#onRefused(event.code, event.reason);
         return;
       case "closed":
+        this.#keepalive.stop();
         if (this.#currentStatus() !== "blocked") {
           // A publish-capable connection can still speak over HTTP while the socket is
           // down; incoming lags until reconnect gap-fill heals it.
@@ -569,6 +578,7 @@ export class ChannelConnection {
   }
 
   #fail(error: PortalError): void {
+    this.#keepalive.stop();
     this.#socket?.close();
     this.store.update((prev) => ({ ...prev, status: "blocked" }));
     this.events.emit("status", "blocked", error);

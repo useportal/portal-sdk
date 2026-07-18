@@ -2,6 +2,7 @@ import { serializeFrame, type WireMessage } from "@portalsdk/wire-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Portal, type ChannelHandle } from "../src/index.js";
+import { GRACE_MS } from "../src/channel.js";
 import { resetHttpClientFactory, setHttpClientFactory } from "../src/http/factory.js";
 import { resetSocketFactory, setSocketFactory } from "../src/transport/factory.js";
 import { MockHttpClient } from "./mock-server/http.js";
@@ -133,6 +134,31 @@ describe("degraded-http", () => {
 
     server.socket?.reconnect();
     await vi.waitFor(() => expect(channel.status).toBe("ready"));
+  });
+});
+
+describe("keepalive", () => {
+  it("pings while the socket is open and stops once torn down", async () => {
+    vi.useFakeTimers();
+    const server = new MockSocketServer((ctx) => ctx.ready());
+    setSocketFactory(server.factory);
+    setHttpClientFactory(new MockHttpClient().factory);
+    const channel = new Portal({ apiKey: "pk", token: "jwt" }).channel("room");
+    channel.acquire();
+
+    await vi.advanceTimersByTimeAsync(0); // connect → open
+    await vi.advanceTimersByTimeAsync(25_000);
+    const pinged = (server.socket?.received.filter((f) => f?.t === "ping") ?? []).length;
+    expect(pinged).toBeGreaterThanOrEqual(1);
+
+    // Teardown stops the pings.
+    channel.release();
+    vi.advanceTimersByTime(GRACE_MS);
+    const afterTeardown = (server.socket?.received.filter((f) => f?.t === "ping") ?? []).length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect((server.socket?.received.filter((f) => f?.t === "ping") ?? []).length).toBe(
+      afterTeardown,
+    );
   });
 });
 
