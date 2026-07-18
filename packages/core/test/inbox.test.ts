@@ -203,8 +203,30 @@ describe("refusal resilience", () => {
     expect(inbox.status).toBe("ready");
   });
 
-  it("keeps trying (reconnecting) after a hard refusal instead of stalling", async () => {
-    const { inbox } = setup((ctx) => ctx.refuse("invalid_api_key"));
-    await vi.waitFor(() => expect(inbox.status).toBe("reconnecting"));
+  it("stops reconnecting on a fatal, unrecoverable refusal", async () => {
+    const { inbox, server } = setup((ctx) => ctx.refuse("invalid_api_key"));
+    // Terminal refusal: the socket is closed rather than retried forever.
+    await vi.waitFor(() => expect(server.socket?.closed).toBe(true));
+    expect(server.socket?.reconnectCount).toBe(0);
+    // No terminal inbox status exists (§5), so it never reaches ready.
+    expect(inbox.status).toBe("connecting");
+  });
+
+  it("keeps retrying a rotating token that is still expired, without closing", async () => {
+    const server = new MockSocketServer((ctx) => ctx.refuse("token_expired"));
+    setSocketFactory(server.factory);
+    const inbox = new Portal({ apiKey: "pk", token: async () => "expired" }).inbox();
+
+    // Refresh once (attempt 2), then keep retrying via the transport rather than closing.
+    await vi.waitFor(() => expect(server.urls).toHaveLength(2));
+    expect(server.socket?.closed).toBe(false);
+    expect(inbox.status).toBe("reconnecting");
+  });
+
+  it("closes on a static token expiry it cannot re-resolve", async () => {
+    const { inbox, server } = setup((ctx) => ctx.refuse("token_expired"));
+    await vi.waitFor(() => expect(server.socket?.closed).toBe(true));
+    expect(server.socket?.reconnectCount).toBe(0);
+    expect(inbox.status).toBe("connecting");
   });
 });

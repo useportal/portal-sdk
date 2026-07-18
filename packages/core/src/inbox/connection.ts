@@ -171,17 +171,26 @@ export class InboxConnection {
       return;
     }
     const decision = classifyRefusal(code, reason);
-    if (decision.kind === "token-expired" && !isStaticToken(this.#deps.token) && !this.#tokenRetryUsed) {
-      this.#tokenRetryUsed = true;
-      this.#socket?.reconnect();
+    if (decision.kind === "token-expired" && !isStaticToken(this.#deps.token)) {
+      // A rotating callback token recovers: refresh once immediately, then let the transport
+      // keep retrying with backoff (the inbox singleton has no other recovery trigger). A
+      // token expiry is not terminal, so keeping the socket open is within the transport
+      // contract.
+      if (this.#tokenRetryUsed) {
+        this.#setStatus("reconnecting");
+      } else {
+        this.#tokenRetryUsed = true;
+        this.#socket?.reconnect();
+      }
       return;
     }
-    // The inbox status union has no terminal state and no error event (§5): a genuinely-fatal
-    // auth refusal also refuses every channel, where it surfaces (status "blocked" + error).
-    // So the inbox stays "reconnecting" and keeps retrying rather than closing — it recovers
-    // when the token rotates or the credentials become valid again, and never lies about
-    // its status or stalls silently.
-    this.#setStatus("reconnecting");
+    // Terminal and unrecoverable (bad key, banned, unsupported version, an invalid or
+    // static-expired token): the transport contract requires a terminal refusal to be
+    // closed, so stop reconnecting rather than hammering forever. The inbox status union has
+    // no terminal state and no error event (§5), so this cannot be surfaced through the inbox
+    // itself — in a typical app it surfaces on the channel socket, which shares these
+    // credentials. SPEC/limitation: an inbox-only app cannot observe a fatal inbox refusal.
+    this.#socket?.close();
   }
 
   /** Replace the store with a permanently-empty, ready inbox for an anonymous token. */
