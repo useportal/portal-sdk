@@ -75,6 +75,31 @@ describe("items", () => {
     expect(inbox.items.map((i) => i.id)).toEqual(["evt_1"]);
     expect(received).toBe("evt_1");
   });
+
+  it("does not re-announce a redelivered item id, but still updates its state", async () => {
+    const { inbox, server } = setup((ctx) => ctx.inboxReady());
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    const arrivals: string[] = [];
+    inbox.on("item", (item) => arrivals.push(item.id));
+
+    const send = (title: string): void =>
+      server.socket?.emit({
+        type: "message",
+        data: serializeFrame({
+          t: "item",
+          item: { id: "evt_1", type: "mention", title, data: {}, at: 1, read: false },
+        }),
+      });
+
+    send("first");
+    send("second"); // same id: a redelivery / in-place update
+
+    // Announced once, but the stored item reflects the latest frame.
+    expect(arrivals).toEqual(["evt_1"]);
+    expect(inbox.items).toHaveLength(1);
+    expect(inbox.items[0]?.title).toBe("second");
+  });
 });
 
 describe("read models", () => {

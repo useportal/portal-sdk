@@ -152,9 +152,12 @@ export class InboxConnection {
       return;
     }
     if (isInboxItem(frame)) {
+      // The item id is the idempotency key; a redelivered id updates state but is not a new
+      // arrival, so the `item` event fires only the first time an id is seen.
+      const isNew = !this.#items.has(frame.item.id);
       this.#items.set(frame.item.id, frame.item);
       this.#publishState();
-      this.events.emit("item", this.#toItem(frame.item));
+      if (isNew) this.events.emit("item", this.#toItem(frame.item));
       return;
     }
     if (isInboxCounter(frame)) {
