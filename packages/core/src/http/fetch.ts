@@ -18,8 +18,8 @@ import type {
 /** HTTP key header carrying the publishable `apiKey` (§3, credential transport). */
 const API_KEY_HEADER = "x-portal-key";
 
-function historyUrl(apiUrl: string, channelId: string, query: HistoryQuery): string {
-  const url = new URL(`${apiUrl}/v1/channels/${encodeURIComponent(channelId)}/history`);
+function historyUrl(httpUrl: string, channelId: string, query: HistoryQuery): string {
+  const url = new URL(`${httpUrl}/v1/channels/${encodeURIComponent(channelId)}/history`);
   const q = url.searchParams;
   if (query.before !== undefined) q.set("before", String(query.before));
   if (query.limit !== undefined) q.set("limit", String(query.limit));
@@ -40,7 +40,7 @@ export const createFetchHttpClient: HttpClientFactory = (
   return {
     async publish(channelId: string, body: PublishBody): Promise<PublishOutcome> {
       const response = await fetch(
-        `${deps.apiUrl}/v1/channels/${encodeURIComponent(channelId)}/messages`,
+        `${deps.httpUrl}/v1/channels/${encodeURIComponent(channelId)}/messages`,
         {
           method: "POST",
           headers: { ...(await authHeaders()), "content-type": "application/json" },
@@ -64,7 +64,7 @@ export const createFetchHttpClient: HttpClientFactory = (
     },
 
     async history(channelId: string, query: HistoryQuery): Promise<HistoryResponse> {
-      const response = await fetch(historyUrl(deps.apiUrl, channelId, query), {
+      const response = await fetch(historyUrl(deps.httpUrl, channelId, query), {
         method: "GET",
         headers: await authHeaders(),
       });
@@ -76,7 +76,7 @@ export const createFetchHttpClient: HttpClientFactory = (
 
     async members(channelId: string, cursor?: string): Promise<MembersResponse> {
       const url = new URL(
-        `${deps.apiUrl}/v1/channels/${encodeURIComponent(channelId)}/members`,
+        `${deps.httpUrl}/v1/channels/${encodeURIComponent(channelId)}/members`,
       );
       if (cursor !== undefined) url.searchParams.set("cursor", cursor);
       const response = await fetch(url.toString(), {
@@ -91,7 +91,7 @@ export const createFetchHttpClient: HttpClientFactory = (
 
     async mintAnonymousToken(anonId?: string): Promise<MintOutcome> {
       // Authenticated by the publishable key only — there is no bearer token yet.
-      const response = await fetch(`${deps.apiUrl}/v1/tokens/anonymous`, {
+      const response = await fetch(`${deps.httpUrl}/v1/tokens/anonymous`, {
         method: "POST",
         headers: { [API_KEY_HEADER]: deps.apiKey, "content-type": "application/json" },
         body: JSON.stringify(anonId !== undefined ? { anonId } : {}),

@@ -3,6 +3,17 @@
 All notable changes to this package are documented here. This package is versioned
 independently of the other `@portalsdk` packages.
 
+## 0.1.3
+
+### Fixed
+
+- **Channel upgrade URL** — now includes the required `/v1` path prefix
+  (`/v1/channels/{id}`); connecting a channel against `0.1.2` or earlier fails the
+  socket upgrade.
+- **`publish`/history/`members`** — now sent to the realtime host instead of the api
+  host, matching the routes those requests actually live on. `0.1.2` and earlier send
+  these to the wrong host and fail.
+
 ## 0.1.0
 
 First functional release — the framework-agnostic Portal client.

@@ -66,7 +66,7 @@ rather than a silent 4xx.
 ```ts
 import { PROTOCOL_VERSION, UPGRADE_PARAMS } from "@portalsdk/wire-protocol";
 
-const url = new URL(`wss://realtime.useportal.co/channels/${channelId}`);
+const url = new URL(`wss://realtime.useportal.co/v1/channels/${channelId}`);
 url.searchParams.set(UPGRADE_PARAMS.version, String(PROTOCOL_VERSION));
 url.searchParams.set(UPGRADE_PARAMS.token, jwt);
 ```

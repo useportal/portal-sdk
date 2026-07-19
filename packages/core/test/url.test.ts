@@ -38,7 +38,7 @@ describe("buildChannelUpgradeUrl", () => {
         last: 42,
       }),
     );
-    expect(url.pathname).toBe("/channels/room%2Fwith%20space");
+    expect(url.pathname).toBe("/v1/channels/room%2Fwith%20space");
     expect(url.searchParams.get("token")).toBe("jwt");
     expect(url.searchParams.get("key")).toBe("pk");
     expect(url.searchParams.get("leaf")).toBe("leaf_3");
