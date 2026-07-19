@@ -1,0 +1,148 @@
+{
+  "$schema": "https://registry.scalar.com/@scalar/schemas/config",
+  "scalar": "2.0.0",
+  "info": {
+    "title": "Portal",
+    "description": "Realtime channels and inbox for your product. Docs for @portalsdk/core, @portalsdk/react, and the Portal config & CLI."
+  },
+  "siteConfig": {
+    "subdomain": "portal",
+    "customDomain": "docs.useportal.co",
+    "theme": "default"
+  },
+  "navigation": {
+    "routes": {
+      "/": {
+        "type": "group",
+        "title": "Portal",
+        "children": {
+          "": {
+            "type": "page",
+            "title": "Quickstart",
+            "filepath": "docs/quickstart.md"
+          },
+          "/core": {
+            "type": "group",
+            "title": "Core SDK",
+            "children": {
+              "/client-setup": {
+                "type": "page",
+                "title": "Client setup",
+                "filepath": "docs/core/client-setup.md"
+              },
+              "/channels": {
+                "type": "page",
+                "title": "Channels",
+                "filepath": "docs/core/channels.md"
+              },
+              "/inbox": {
+                "type": "page",
+                "title": "Inbox",
+                "filepath": "docs/core/inbox.md"
+              },
+              "/tokens-and-auth": {
+                "type": "page",
+                "title": "Tokens & auth",
+                "filepath": "docs/core/tokens-and-auth.md"
+              },
+              "/errors": {
+                "type": "page",
+                "title": "Errors",
+                "filepath": "docs/core/errors.md"
+              },
+              "/ssr-and-nextjs": {
+                "type": "page",
+                "title": "SSR & Next.js",
+                "filepath": "docs/core/ssr-and-nextjs.md"
+              }
+            }
+          },
+          "/react": {
+            "type": "group",
+            "title": "React",
+            "children": {
+              "/provider": {
+                "type": "page",
+                "title": "PortalProvider",
+                "filepath": "docs/react/provider.md"
+              },
+              "/use-channel": {
+                "type": "page",
+                "title": "useChannel",
+                "filepath": "docs/react/use-channel.md"
+              },
+              "/use-inbox": {
+                "type": "page",
+                "title": "useInbox",
+                "filepath": "docs/react/use-inbox.md"
+              },
+              "/patterns": {
+                "type": "page",
+                "title": "Patterns",
+                "filepath": "docs/react/patterns.md"
+              }
+            }
+          },
+          "/guides": {
+            "type": "group",
+            "title": "Guides",
+            "children": {
+              "/realtime-chat": {
+                "type": "page",
+                "title": "Realtime chat",
+                "filepath": "docs/guides/realtime-chat.md"
+              },
+              "/in-app-notifications": {
+                "type": "page",
+                "title": "In-app notifications",
+                "filepath": "docs/guides/in-app-notifications.md"
+              },
+              "/live-cursors": {
+                "type": "page",
+                "title": "Live cursors",
+                "filepath": "docs/guides/live-cursors.md"
+              }
+            }
+          },
+          "/config-cli": {
+            "type": "group",
+            "title": "Config & CLI",
+            "children": {
+              "/portal-config": {
+                "type": "page",
+                "title": "Authoring portal.config.ts",
+                "filepath": "docs/config-cli/portal-config.md"
+              },
+              "/deploy-and-secrets": {
+                "type": "page",
+                "title": "Deploy & secrets",
+                "filepath": "docs/config-cli/deploy-and-secrets.md"
+              }
+            }
+          },
+          "/wire-protocol": {
+            "type": "page",
+            "title": "Wire protocol",
+            "filepath": "docs/wire-protocol.md"
+          },
+          "/api-reference": {
+            "type": "group",
+            "title": "API reference",
+            "children": {
+              "": {
+                "type": "page",
+                "title": "Overview",
+                "filepath": "docs/api-reference/index.md"
+              },
+              "/spec": {
+                "type": "openapi",
+                "title": "HTTP API",
+                "filepath": "openapi/openapi.yaml"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
