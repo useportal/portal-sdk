@@ -46,7 +46,8 @@ export interface HttpClient {
 }
 
 export interface HttpClientDeps {
-  apiUrl: string;
+  /** HTTP origin this client sends every request to (no trailing slash). */
+  httpUrl: string;
   apiKey: string;
   token: import("../token.js").TokenSource;
 }

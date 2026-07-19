@@ -26,7 +26,7 @@ export interface ChannelUpgradeParams {
 /** Build a channel socket upgrade URL (§1.1). */
 export function buildChannelUpgradeUrl(params: ChannelUpgradeParams): string {
   const { realtimeUrl, channelId, token, apiKey, leaf, meta, last } = params;
-  const url = new URL(`${realtimeUrl}/channels/${encodeURIComponent(channelId)}`);
+  const url = new URL(`${realtimeUrl}/v1/channels/${encodeURIComponent(channelId)}`);
   const q = url.searchParams;
   q.set(UPGRADE_PARAMS.version, String(PROTOCOL_VERSION));
   q.set(UPGRADE_PARAMS.token, token);

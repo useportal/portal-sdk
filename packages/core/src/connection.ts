@@ -572,7 +572,7 @@ export class ChannelConnection {
   #httpClient(): HttpClient {
     if (this.#http === undefined) {
       this.#http = getHttpClientFactory()({
-        apiUrl: this.#deps.hosts.apiUrl,
+        httpUrl: this.#deps.hosts.realtimeHttpUrl,
         apiKey: this.#deps.apiKey,
         token: this.#deps.credentials.resolve,
       });

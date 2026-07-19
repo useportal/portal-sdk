@@ -129,7 +129,7 @@ export class Credentials {
   #client(): HttpClient {
     if (this.#mintClient === undefined) {
       this.#mintClient = getHttpClientFactory()({
-        apiUrl: this.#hosts.apiUrl,
+        httpUrl: this.#hosts.apiUrl,
         apiKey: this.#apiKey,
         // The mint route authenticates by apiKey only and never resolves a bearer token.
         token: () => Promise.reject(new Error("the mint route does not use a bearer token")),
