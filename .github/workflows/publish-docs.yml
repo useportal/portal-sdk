@@ -1,0 +1,36 @@
+name: Publish docs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs-site/**"
+
+jobs:
+  publish-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Use Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install samples-check dependencies
+        working-directory: docs-site/samples-check
+        run: npm ci
+
+      - name: Check doc code samples
+        working-directory: docs-site/samples-check
+        run: npm run check
+
+      - name: Log in to Scalar
+        working-directory: docs-site
+        run: npx @scalar/cli auth login --token ${{ secrets.SCALAR_API_KEY }}
+
+      - name: Publish Scalar project
+        working-directory: docs-site
+        run: npx @scalar/cli project publish --slug portalsdk

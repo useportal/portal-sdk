@@ -1,0 +1,1802 @@
+openapi: 3.1.0
+info:
+  title: Portal Public API
+  version: 1.0.0
+  summary: Mint end-user tokens, publish messages, manage channels, and deploy config.
+  description: |
+    The public HTTP surface of the Portal platform.
+
+    Portal exposes two hosts:
+
+    * **`https://api.useportal.co`** — the control plane. Tenant backends call it
+      with a **secret key** (`sk_...`) to mint end-user tokens, publish server
+      messages, manage channel membership and bans, send notifications, and deploy
+      configuration. One route (`/v1/tokens/anonymous`) also accepts a
+      **publishable key** (`pk_...`) so a browser can mint anonymous tokens with no
+      backend in the loop.
+    * **`https://realtime.useportal.co`** — the realtime edge. End-user clients call
+      it with a **Portal user JWT** (minted via `/v1/tokens`) to publish messages on
+      their own behalf and to read message history and channel rosters.
+
+    ## Authentication at a glance
+    * `secretKey` — `Authorization: Bearer sk_...`. Server-only; never send a secret
+      key from a browser (requests carrying an `Origin` header are rejected).
+    * `publishableKey` — `Authorization: Bearer pk_...` **or** the `x-portal-key:
+      pk_...` header. Browser-safe; accepted only on `/v1/tokens/anonymous`.
+    * `userToken` — `Authorization: Bearer <jwt>`. A Portal user JWT minted via
+      `/v1/tokens` (or `/v1/tokens/anonymous` for anonymous users). Used on the
+      realtime host.
+
+    The environment a credential belongs to is resolved from the credential itself,
+    never from the URL.
+
+    ## Errors
+    Every non-2xx response has a JSON body `{ code, reason? }` and an
+    `x-portal-error` response header carrying the same `code`. Read `code` from the
+    body or the header rather than branching on HTTP status alone — several codes
+    share a status.
+
+    ## Excluded from this document
+    The following are deliberately **not** modeled here:
+
+    * **`/internal/*`** — platform-internal surfaces, not callable with customer
+      credentials.
+    * **Dashboard CRUD routes** — Clerk-session-authenticated routes used by the
+      Portal dashboard (organization/project/environment/API-key/allowed-origin
+      management, the message browser, and the `logs-token` mint's sibling routes).
+      The one dashboard route useful to integrators, `POST
+      /v1/environments/{envId}/logs-token`, is included and flagged below.
+    * **WebSocket endpoints** (`GET /v1/channels/{id}`, `GET /inbox`, `GET
+      /v1/environments/{envId}/logs`) — OpenAPI does not model WebSockets. They are
+      documented separately as prose, including the connection handshake, frame
+      types, and refusal codes.
+
+  contact:
+    name: Portal Support
+    url: https://useportal.co
+    email: support@useportal.co
+  license:
+    name: Proprietary
+    url: https://useportal.co/terms
+
+servers:
+  - url: https://api.useportal.co
+    description: Control plane (tenant backend, secret key).
+  - url: https://realtime.useportal.co
+    description: Realtime edge (end-user client, user JWT).
+
+tags:
+  - name: Tokens
+    description: Mint end-user and anonymous Portal JWTs.
+  - name: Channels — Admin
+    description: Server-side channel operations (secret key) on the control plane.
+  - name: Channels — Client
+    description: End-user client operations (user JWT) on the realtime edge.
+  - name: Notifications
+    description: Send a notification to a single user.
+  - name: Deploys
+    description: Upload and activate channel configuration.
+  - name: Secrets
+    description: Manage runtime secret values for your deployed config.
+  - name: Dashboard
+    description: Dashboard-session routes (Clerk), surfaced for integrators where useful.
+
+security:
+  - secretKey: []
+
+paths:
+
+  # ── Tokens ────────────────────────────────────────────────
+
+  /v1/tokens:
+    post:
+      operationId: mintToken
+      tags: [Tokens]
+      servers:
+        - url: https://api.useportal.co
+      summary: Mint an end-user Portal JWT
+      description: |
+        Mints a signed Portal user JWT for one of your end users. Send the token to
+        your client; it then connects to the realtime edge and calls client routes
+        with `Authorization: Bearer <jwt>`.
+
+        `claims` is an opaque bag you define — it travels with the token and is
+        available to your channel config's authorization logic and to message
+        senders (as read-only metadata). `channels`, when present, restricts the
+        token to the listed channels and grants; omit it to allow whatever the
+        channel config permits. `ttl` accepts values like `1h`, `30m`, `45s`,
+        `2d`, or a bare number of seconds; it defaults to one hour.
+
+        Server-only. A request carrying an `Origin` header (a browser) is rejected.
+      security:
+        - secretKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MintTokenRequest"
+            examples:
+              default:
+                summary: Mint a 1-hour token for user "u_123" with a claims bag
+                value:
+                  userId: u_123
+                  claims:
+                    username: ada
+                    avatar: https://cdn.example.com/ada.png
+                  ttl: 1h
+      responses:
+        "200":
+          description: Token minted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+              examples:
+                default:
+                  summary: A signed JWT and its expiry
+                  value:
+                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImVudl8xMjMifQ.eyJzdWIiOiJ1XzEyMyIsImFub24iOmZhbHNlLCJpYXQiOjE3NTI5MTIwMDAsImV4cCI6MTc1MjkxNTYwMH0.signature
+                    expiresAt: "2026-07-19T03:00:00.000Z"
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/tokens/anonymous:
+    post:
+      operationId: mintAnonymousToken
+      tags: [Tokens]
+      servers:
+        - url: https://api.useportal.co
+      summary: Mint an anonymous Portal JWT
+      description: |
+        Mints an anonymous user JWT (`claims.anon = true`). Two ways to call it,
+        both returning the same token shape:
+
+        **(a) Secret key — server-side.** Send `Authorization: Bearer sk_...`. You
+        may set `channels` grants and a custom `ttl`. Browser requests are rejected
+        (a secret key must never reach a browser).
+
+        **(b) Publishable key — browser-side, zero backend.** Send
+        `Authorization: Bearer pk_...` **or** the `x-portal-key: pk_...` header. The
+        body may contain **only** `anonId` — `channels` and `ttl` are rejected with
+        `validation_failed`; the platform default TTL (one hour) and default grants
+        apply. This path is the only route on the control plane that is
+        browser-CORS-enabled, scoped to the environment's registered allowed
+        origins (loopback is always allowed). It is coarsely rate-limited per key.
+
+        `anonId` (optional, both paths) must match the `anon_...` id format
+        exactly. When present it is reused as the token subject, so an SDK can
+        re-mint on expiry for the **same** anonymous identity. When absent, a fresh
+        id is generated and returned as the token subject.
+
+        > A browser preflight (`OPTIONS`) does not carry the auth header, so for
+        > preflight env-resolution only the publishable key may also be sent as the
+        > `?key=pk_...` query parameter. The actual `POST` still requires the key in
+        > a header.
+      security:
+        - secretKey: []
+        - publishableKey: []
+      parameters:
+        - $ref: "#/components/parameters/AnonymousKeyQuery"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MintAnonymousTokenRequest"
+            examples:
+              server:
+                summary: Server-side mint with a channel grant and 30-minute TTL
+                value:
+                  channels:
+                    chat-general: [connect, publish]
+                  ttl: 30m
+                  anonId: anon_Vk8v2pBpHx7mJ9sXkFq3Qw
+              browser:
+                summary: Browser mint with a stable anonymous identity
+                value:
+                  anonId: anon_Vk8v2pBpHx7mJ9sXkFq3Qw
+      responses:
+        "200":
+          description: Anonymous token minted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+              examples:
+                default:
+                  summary: A signed anonymous JWT and its expiry
+                  value:
+                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImVudl8xMjMifQ.eyJzdWIiOiJhbm9uX1ZrOHYycEJwSHg3bUo5c1hrRnEzUXciLCJhbm9uIjp0cnVlLCJpYXQiOjE3NTI5MTIwMDAsImV4cCI6MTc1MjkxNTYwMH0.signature
+                    expiresAt: "2026-07-19T03:00:00.000Z"
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  # ── Channels: Admin (control plane, sk_) ──────────────────
+
+  /v1/channels/{channelId}/messages:
+    post:
+      operationId: publishServerMessage
+      tags: [Channels — Admin]
+      servers:
+        - url: https://api.useportal.co
+          description: Server publish — secret key.
+        - url: https://realtime.useportal.co
+          description: Client publish — user JWT (see the "Client publish" request body).
+      summary: Publish a message to a channel
+      description: |
+        Publishes a message to a channel. The same path serves two distinct callers
+        on two hosts — the host you target determines how you authenticate and what
+        the body contains:
+
+        * **Control plane (`api.useportal.co`)** — server publish. Authenticate
+          with a **secret key** and include `senderId` in the body (the server names
+          the sender; there is no user JWT to derive it from). A server publish is
+          pre-trusted: it bypasses your channel config's publish middleware and
+          authorization, so it always lands. Platform limits still apply (content
+          ≤ 2 KB; per-channel rate limit). The notification bridge that your config
+          can wire to `notify` does **not** run for a server publish — use
+          `/v1/users/{userId}/notifications` to deliver notifications.
+        * **Realtime edge (`realtime.useportal.co`)** — client publish.
+          Authenticate with a **user JWT** and omit `senderId` (the sender is the
+          token's subject). A client publish is subject to your channel config's
+          authorization and publish middleware, which may block, mask, or defer it.
+
+        `content` is opaque to the platform and capped at 2 KB. `kind` defaults to
+        `text` (the only value in v1). `type` is a userland discriminator (defaults
+        to `message`). Set `to` to a member's user id to deliver to that one member
+        only (no broadcast) and write them an inbox item. `mentions` is a list of
+        `{ userId }` declared by the sender; the platform verifies each is a member,
+        dedupes, and caps the count.
+      security:
+        - secretKey: []
+        - userToken: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/ServerPublishRequest"
+                - $ref: "#/components/schemas/ClientPublishRequest"
+              description: |
+                Use `ServerPublishRequest` on the control plane (with a secret key)
+                and `ClientPublishRequest` on the realtime edge (with a user JWT).
+            examples:
+              server:
+                summary: Server publish on the control plane
+                value:
+                  senderId: server
+                  type: system
+                  content:
+                    text: Welcome to the channel!
+                  kind: text
+              client:
+                summary: Client publish on the realtime edge
+                value:
+                  type: message
+                  content:
+                    text: hello world
+                  kind: text
+                  mentions:
+                    - userId: u_456
+      responses:
+        "200":
+          description: Message accepted and persisted. The ack confirms storage — a later retraction can still modify it.
+          headers:
+            x-portal-error:
+              $ref: "#/components/headers/XPortalError"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendAck"
+              examples:
+                default:
+                  summary: Platform-assigned id, per-channel sequence, and timestamp
+                  value:
+                    id: m_1752912000_42
+                    seq: 42
+                    timestamp: 1752912000000
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Forbidden. `forbidden` (secret key used from a browser, or a publishable key on a secret-only path), `not_permitted` (your config's authorization denied the publish or the direct send), `banned` (the sender is banned from this channel), or `not_member` (a `to:` recipient is not a channel member).
+          headers:
+            x-portal-error:
+              $ref: "#/components/headers/XPortalError"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                not_permitted:
+                  value:
+                    code: not_permitted
+                    reason: publish not permitted
+                banned:
+                  value:
+                    code: banned
+                    reason: sender is banned from this channel
+        "413": { $ref: "#/components/responses/ContentTooLarge" }
+        "422": { $ref: "#/components/responses/BlockedByMiddleware" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/channels/{channelId}/members:
+    post:
+      operationId: addChannelMembers
+      tags: [Channels — Admin]
+      servers:
+        - url: https://api.useportal.co
+      summary: Add member(s) to a channel
+      description: |
+        Adds one or more members to a **standard** channel. Upsert and idempotent:
+        re-adding an existing member updates their `claims` and is not an error.
+        Membership may precede any connection — the channel appears in each added
+        user's inbox immediately.
+
+        Send either a single `{ userId, claims? }` or a batch `{ members: [...] }`
+        (up to 100 members per request). `claims` is an optional display snapshot
+        (for example `username`, `avatar`) recorded at add time; a row otherwise
+        fills in when the user first connects.
+      security:
+        - secretKey: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/AddMemberSingle"
+                - $ref: "#/components/schemas/AddMemberBatch"
+              description: Send a single member or a batch.
+            examples:
+              single:
+                summary: Add one member with a display snapshot
+                value:
+                  userId: u_456
+                  claims:
+                    username: grace
+              batch:
+                summary: Add several members at once
+                value:
+                  members:
+                    - userId: u_456
+                      claims:
+                        username: grace
+                    - userId: u_789
+      responses:
+        "200":
+          description: Members added.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddMembersResponse"
+              examples:
+                default:
+                  summary: Two members were added
+                  value:
+                    added: 2
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+    get:
+      operationId: listChannelMembers
+      tags: [Channels — Client]
+      servers:
+        - url: https://realtime.useportal.co
+      summary: List channel members
+      description: |
+        Returns the member directory of a **standard** channel, with each member's
+        `online` state merged from live presence. This is a fetched directory, not
+        live presence updates — subscribe to the channel WebSocket for live joins
+        and leaves. Keyset-paged by `cursor`; `cursor` is absent on the last page.
+
+        Broadcast channels have no membership concept and return `404
+        not_membership_channel`. Browser CORS is enabled for this route, scoped to
+        the environment's allowed origins. `limit` defaults to 100 and is capped at
+        500.
+      security:
+        - userToken: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque keyset cursor returned by the previous page; absent on the last page.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+          description: Page size (default 100, max 500).
+          example: 100
+      responses:
+        "200":
+          description: A page of members.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MembersResponse"
+              examples:
+                default:
+                  summary: Two members, one online, another page available
+                  value:
+                    members:
+                      - userId: u_123
+                        online: true
+                        claims:
+                          username: ada
+                      - userId: u_456
+                        online: false
+                        claims:
+                          username: grace
+                    cursor: u_456
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotMembershipChannel" }
+
+  /v1/channels/{channelId}/members/{userId}:
+    delete:
+      operationId: removeChannelMember
+      tags: [Channels — Admin]
+      servers:
+        - url: https://api.useportal.co
+      summary: Remove a member from a channel
+      description: |
+        Removes a member from a standard channel (a leave or a removal — the same
+        operation). Idempotent: removing someone who is not a member is not an
+        error. The user's inbox row for this channel is removed with the membership.
+      security:
+        - secretKey: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Member removed (or was already absent).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Empty"
+              examples:
+                default:
+                  value: {}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/channels/{channelId}/bans:
+    post:
+      operationId: banChannelUser
+      tags: [Channels — Admin]
+      servers:
+        - url: https://api.useportal.co
+      summary: Ban a user from a channel
+      description: |
+        Bans a user from a channel. Any live connection for that user on this
+        channel is force-disconnected. A ban is independent of membership — banning
+        does not remove the member row, so combine a ban with a remove if you want
+        both kick and lock. `expiresAt` (ISO 8601) is optional; omit it for a ban
+        that does not auto-expire.
+      security:
+        - secretKey: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BanRequest"
+            examples:
+              default:
+                summary: Ban a user with an expiry
+                value:
+                  userId: u_456
+                  expiresAt: "2026-08-19T00:00:00.000Z"
+      responses:
+        "200":
+          description: Ban recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Empty"
+              examples:
+                default:
+                  value: {}
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/channels/{channelId}/bans/{userId}:
+    delete:
+      operationId: unbanChannelUser
+      tags: [Channels — Admin]
+      servers:
+        - url: https://api.useportal.co
+      summary: Lift a ban
+      description: |
+        Removes a ban. Idempotent. Lifting a ban does not restore any prior state —
+        it simply allows the user to connect and publish again, subject to your
+        channel config's normal authorization.
+      security:
+        - secretKey: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Ban lifted (or was already absent).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Empty"
+              examples:
+                default:
+                  value: {}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ── Notifications ──────────────────────────────────────────
+
+  /v1/users/{userId}/notifications:
+    post:
+      operationId: sendNotification
+      tags: [Notifications]
+      servers:
+        - url: https://api.useportal.co
+      summary: Send a notification to a user
+      description: |
+        Delivers a notification to a single user as an inbox item, with a live push
+        if the user is currently connected. Works for users who have never
+        connected (the inbox is created lazily). No batching and no external
+        destinations in v1 — delivery is to the Portal inbox only.
+
+        Send an `idempotency-key` header to make the send idempotent: the same key
+        always returns the same item id and creates the item at most once.
+      security:
+        - secretKey: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotifyRequest"
+            examples:
+              default:
+                summary: A "ticket.assigned" notification with a payload
+                value:
+                  type: ticket.assigned
+                  title: Ticket #128 was assigned to you
+                  data:
+                    ticketId: "128"
+                    channelId: tkt-128
+      responses:
+        "200":
+          description: Notification delivered. The id is the inbox item id (or the idempotency key, if you supplied one).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotifyResponse"
+              examples:
+                default:
+                  summary: The created item id
+                  value:
+                    id: ntf_4d2a1f0c-8b7e-4c1a-9d3f-2a1b0c3d4e5f
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ── Deploys ────────────────────────────────────────────────
+
+  /v1/deploys:
+    post:
+      operationId: createDeploy
+      tags: [Deploys]
+      servers:
+        - url: https://api.useportal.co
+      summary: Upload a config version
+      description: |
+        Validates and uploads a new configuration version, returning its
+        content-addressed `versionId`. The version is **inactive** until you call
+        `/v1/deploys/{versionId}/activate`.
+
+        `extract` is the declarative configuration (see the schema). `hookScript`
+        and `extensionScripts` carry the bundled code your config references, if
+        any. Re-uploading identical content returns `409 version_exists` — treat it
+        as success client-side (the existing `versionId` is stable).
+      security:
+        - secretKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeployRequest"
+            examples:
+              default:
+                summary: A minimal config with one standard channel
+                value:
+                  extract:
+                    version: "1"
+                    project:
+                      webhooks: null
+                    channels:
+                      chat-general:
+                        mode: standard
+                        anonymous: true
+                        hooks:
+                          authz: true
+                          onPublish: 1
+                          notify: false
+                        extensions: {}
+      responses:
+        "200":
+          description: Version uploaded (inactive).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeployResponse"
+              examples:
+                default:
+                  summary: The content-addressed version id
+                  value:
+                    versionId: cfg_3f1a9b2c8d4e6f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/VersionExists" }
+
+    get:
+      operationId: listDeploys
+      tags: [Deploys]
+      servers:
+        - url: https://api.useportal.co
+      summary: List deploys
+      description: |
+        Returns the deploy audit trail for the environment (newest first), including
+        both `deploy` and `rollback` actions. `limit` defaults to 50 and is capped
+        at 100.
+      security:
+        - secretKey: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Maximum number of deploy records to return.
+          example: 25
+      responses:
+        "200":
+          description: Deploy audit trail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListDeploysResponse"
+              examples:
+                default:
+                  summary: Two recent deploys
+                  value:
+                    deploys:
+                      - id: dep_01HBX...
+                        configVersionId: cfg_3f1a9b2c8d4e6f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a
+                        action: deploy
+                        createdAt: "2026-07-19T02:00:00.000Z"
+                      - id: dep_01HBY...
+                        configVersionId: cfg_2a1b...
+                        action: rollback
+                        createdAt: "2026-07-18T18:00:00.000Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/deploys/{versionId}/activate:
+    post:
+      operationId: activateDeploy
+      tags: [Deploys]
+      servers:
+        - url: https://api.useportal.co
+      summary: Activate a config version
+      description: |
+        Points the environment's active configuration at the given version. A
+        newly-connected channel picks up the active config on its next load;
+        channels already connected keep their previously-loaded config until they
+        reconnect. Activating an older version is a rollback.
+      security:
+        - secretKey: []
+      parameters:
+        - $ref: "#/components/parameters/VersionId"
+      responses:
+        "200":
+          description: Version activated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Empty"
+              examples:
+                default:
+                  value: {}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/configs/active:
+    get:
+      operationId: getActiveConfig
+      tags: [Deploys]
+      servers:
+        - url: https://api.useportal.co
+      summary: Get the active config
+      description: |
+        Returns the environment's currently active configuration version: its
+        `versionId`, the full `extract`, and when it was activated.
+      security:
+        - secretKey: []
+      responses:
+        "200":
+          description: The active configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActiveConfigResponse"
+              examples:
+                default:
+                  summary: Active config with one channel
+                  value:
+                    versionId: cfg_3f1a9b2c8d4e6f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a
+                    activatedAt: "2026-07-19T02:00:00.000Z"
+                    extract:
+                      version: "1"
+                      project:
+                        webhooks: null
+                      channels:
+                        chat-general:
+                          mode: standard
+                          anonymous: true
+                          hooks:
+                            authz: true
+                            onPublish: 1
+                            notify: false
+                          extensions: {}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ── Secrets ────────────────────────────────────────────────
+
+  /v1/secrets/{name}:
+    put:
+      operationId: putSecret
+      tags: [Secrets]
+      servers:
+        - url: https://api.useportal.co
+      summary: Set a secret value
+      description: |
+        Sets a runtime secret for your deployed config. The value is injected into
+        your config's runtime environment; only the secret's **name** and
+        timestamps are stored in the control plane — the value itself is never
+        persisted there and is never listed by `GET /v1/secrets`.
+      security:
+        - secretKey: []
+      parameters:
+        - $ref: "#/components/parameters/SecretName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutSecretRequest"
+            examples:
+              default:
+                summary: Set a third-party API token
+                value:
+                  value: sk_live_abc123...
+      responses:
+        "200":
+          description: Secret stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Empty"
+              examples:
+                default:
+                  value: {}
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+    delete:
+      operationId: deleteSecret
+      tags: [Secrets]
+      servers:
+        - url: https://api.useportal.co
+      summary: Delete a secret
+      description: |
+        Removes a runtime secret. Idempotent. After deletion, the value is no longer
+        available to your config's runtime.
+      security:
+        - secretKey: []
+      parameters:
+        - $ref: "#/components/parameters/SecretName"
+      responses:
+        "200":
+          description: Secret removed (or was already absent).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Empty"
+              examples:
+                default:
+                  value: {}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/secrets:
+    get:
+      operationId: listSecrets
+      tags: [Secrets]
+      servers:
+        - url: https://api.useportal.co
+      summary: List secret names
+      description: |
+        Returns the names of the runtime secrets set for the environment, with
+        timestamps. **Never** returns secret values.
+      security:
+        - secretKey: []
+      responses:
+        "200":
+          description: Secret names and timestamps.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListSecretsResponse"
+              examples:
+                default:
+                  summary: Two configured secrets
+                  value:
+                    secrets:
+                      - name: STRIPE_API_KEY
+                        createdAt: "2026-07-18T12:00:00.000Z"
+                        updatedAt: "2026-07-19T01:30:00.000Z"
+                      - name: WEBHOOK_SIGNING_KEY
+                        createdAt: "2026-07-18T12:00:00.000Z"
+                        updatedAt: "2026-07-18T12:00:00.000Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ── Dashboard (Clerk session) ─────────────────────────────
+
+  /v1/environments/{envId}/logs-token:
+    post:
+      operationId: mintLogsToken
+      tags: [Dashboard]
+      servers:
+        - url: https://api.useportal.co
+      summary: Mint a short-lived live-activity token (dashboard session)
+      description: |
+        Mints a short-lived, analytics-scoped Portal JWT used to open the
+        environment's live-activity WebSocket on the realtime edge. **Dashboard
+        session auth** — this route is authenticated with a Clerk dashboard session
+        (the same session the Portal dashboard uses), **not** with a secret key,
+        and the caller must belong to the organization that owns the environment.
+
+        > **Flagged in the PR:** OpenAPI's `http bearer` scheme does not cleanly
+        > model a browser-cookie dashboard session, so this operation is described
+        > with a `dashboard-session` security scheme (documentation-only — it
+        > carries no header a client sends programmatically). Integrators building
+        > custom dashboards should use the Portal dashboard instead of calling this
+        > route directly. The token has a fixed 15-minute TTL and an `analytics`
+        > scope; it is refused on channel and inbox routes.
+      security:
+        - dashboardSession: []
+      parameters:
+        - $ref: "#/components/parameters/EnvId"
+      responses:
+        "200":
+          description: Analytics token minted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+              examples:
+                default:
+                  summary: A 15-minute analytics-scoped JWT
+                  value:
+                    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImVudl8xMjMifQ.eyJzdWIiOiJkYXNoYm9hcmQ6dXNlcl9hYmMiLCJhbm9uIjpmYWxzZSwic2NvcGUiOiJhbmFseXRpY3MiLCJpYXQiOjE3NTI5MTIwMDAsImV4cCI6MTc1MjkxMjkwMH0.signature
+                    expiresAt: "2026-07-19T02:15:00.000Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ── Channels: Client (realtime edge, user JWT) ────────────
+
+  /v1/channels/{channelId}/history:
+    get:
+      operationId: getChannelHistory
+      tags: [Channels — Client]
+      servers:
+        - url: https://realtime.useportal.co
+      summary: Read message history
+      description: |
+        Returns message history for a channel. One endpoint serves two paging
+        styles:
+
+        * **Scroll-up paging** — `?before={seq}&limit={n}`. Returns messages older
+          than `before`, ascending (oldest first), up to `limit` (default 50, max
+          100). Omit `before` to start from the newest.
+        * **Gap-fill range** — `?from={seq}&to={seq}`. Returns messages in the
+          inclusive `[from, to]` sequence range, ascending.
+
+        The response is `{ msgs, hasMore }`. Retracted messages come back as
+        tombstoned envelopes (`retracted: true`, `content: null`). Browser CORS is
+        enabled for this route, scoped to the environment's allowed origins.
+      security:
+        - userToken: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+        - name: before
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Return messages with `seq` less than this value (scroll-up paging).
+          example: 100
+        - name: from
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Inclusive lower bound of a gap-fill range (use with `to`).
+          example: 80
+        - name: to
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Inclusive upper bound of a gap-fill range (use with `from`).
+          example: 120
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+          description: Page size for scroll-up paging (default 50, max 100).
+          example: 50
+      responses:
+        "200":
+          description: A page of messages and whether more are available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryResponse"
+              examples:
+                default:
+                  summary: One message, more available
+                  value:
+                    msgs:
+                      - id: m_1752912000_41
+                        seq: 41
+                        type: message
+                        kind: text
+                        content:
+                          text: hi
+                        sender:
+                          id: u_123
+                          anon: false
+                        timestamp: 1752911999000
+                        retracted: false
+                        ephemeral: false
+                    hasMore: true
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+
+  securitySchemes:
+    secretKey:
+      type: http
+      scheme: bearer
+      description: |
+        A Portal secret key (`sk_...`). Server-only — never send a secret key from
+        a browser; requests carrying an `Origin` header are rejected with `403
+        forbidden`.
+    publishableKey:
+      type: http
+      scheme: bearer
+      description: |
+        A Portal publishable key (`pk_...`), browser-safe. Send as `Authorization:
+        Bearer pk_...` **or** as the `x-portal-key: pk_...` header. Accepted only
+        on `/v1/tokens/anonymous`.
+    userToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A Portal user JWT minted via `/v1/tokens` (or `/v1/tokens/anonymous` for
+        anonymous users). Used on the realtime edge.
+    dashboardSession:
+      type: http
+      scheme: bearer
+      description: |
+        Documentation-only marker for a Clerk dashboard session (browser cookie).
+        Not a header a client sends programmatically; see the route description.
+
+  parameters:
+
+    ChannelId:
+      name: channelId
+      in: path
+      required: true
+      schema: { type: string }
+      description: The channel id. Channels are not created explicitly — they exist by being used.
+      example: chat-general
+
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string }
+      description: A user id (the `sub` you minted the token with, or an id you add as a member).
+      example: u_456
+
+    EnvId:
+      name: envId
+      in: path
+      required: true
+      schema: { type: string }
+      description: The environment id.
+      example: env_abc123
+
+    VersionId:
+      name: versionId
+      in: path
+      required: true
+      schema: { type: string }
+      description: A content-addressed config version id (`cfg_...`).
+      example: cfg_3f1a9b2c8d4e6f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a
+
+    SecretName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+      description: The secret name. Arbitrary string; your config references it by name.
+      example: STRIPE_API_KEY
+
+    IdempotencyKey:
+      name: idempotency-key
+      in: header
+      required: false
+      schema: { type: string }
+      description: Optional. The same key returns the same item id and creates the item at most once.
+      example: 4d2a1f0c-8b7e-4c1a-9d3f-2a1b0c3d4e5f
+
+    AnonymousKeyQuery:
+      name: key
+      in: query
+      required: false
+      schema: { type: string }
+      description: |
+        Publishable key (`pk_...`), accepted **only** on the CORS preflight
+        (`OPTIONS`) of this route, where the auth header is not sent. The actual
+        `POST` requires the key in a header.
+
+  headers:
+
+    XPortalError:
+      description: The error `code`, mirrored from the response body for body-eating proxies.
+      schema: { type: string }
+
+  responses:
+
+    Unauthorized:
+      description: Authentication missing, invalid, or revoked. On realtime-edge routes the code is `invalid_token` (or `token_expired`).
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            unauthorized:
+              value: { code: unauthorized }
+            invalid_token:
+              value: { code: invalid_token, reason: token query param required }
+
+    Forbidden:
+      description: |
+        Forbidden. `forbidden` (a secret key was sent from a browser, or a
+        publishable key reached a secret-only path) or `not_permitted` (your
+        config's authorization denied the action).
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            forbidden:
+              value:
+                code: forbidden
+                reason: secret keys must not be used from browsers
+
+    NotFound:
+      description: The resource was not found.
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            default:
+              value: { code: not_found }
+
+    NotMembershipChannel:
+      description: The channel has no membership concept (it is a broadcast channel).
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            default:
+              value: { code: not_membership_channel }
+
+    ValidationFailed:
+      description: The request body or parameters failed validation. `reason` describes the problem.
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            default:
+              value:
+                code: validation_failed
+                reason: userId is required
+
+    VersionExists:
+      description: Identical config content was already uploaded. Treat as success — the existing `versionId` is stable.
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            default:
+              value:
+                code: version_exists
+                reason: identical config already deployed
+
+    RateLimited:
+      description: Rate limited. Retry after the indicated interval.
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            default:
+              value: { code: rate_limited }
+
+    ContentTooLarge:
+      description: The message `content` exceeds the 2 KB cap.
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            default:
+              value:
+                code: content_too_large
+                reason: content exceeds 2KB
+
+    BlockedByMiddleware:
+      description: Your channel config's publish middleware blocked the message. `reason` is end-user-visible copy.
+      headers:
+        x-portal-error: { $ref: "#/components/headers/XPortalError" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          examples:
+            default:
+              value:
+                code: blocked_by_middleware
+                reason: message rejected by moderation
+
+  schemas:
+
+    ErrorCode:
+      type: string
+      description: |
+        An error code. The control plane returns the first group; the realtime edge
+        additionally returns `invalid_token`, `token_expired`, and `not_member` on
+        the routes included here.
+      enum:
+        - unauthorized
+        - forbidden
+        - not_found
+        - validation_failed
+        - conflict
+        - rate_limited
+        - content_too_large
+        - not_permitted
+        - banned
+        - blocked_by_middleware
+        - not_membership_channel
+        - version_exists
+        - invalid_token
+        - token_expired
+        - not_member
+
+    ErrorEnvelope:
+      type: object
+      required: [code]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        reason:
+          type: string
+          description: A human-readable explanation. Absent when the code is self-explanatory.
+      additionalProperties: false
+
+    Empty:
+      type: object
+      description: An empty JSON object.
+      additionalProperties: false
+      example: {}
+
+    # ── Tokens ──
+
+    ChannelGrants:
+      type: object
+      description: |
+        A map of channel id to a list of granted capabilities (for example
+        `["connect", "publish"]`). Omit on a token to allow whatever the channel
+        config permits.
+      additionalProperties:
+        type: array
+        items: { type: string }
+      example:
+        chat-general: [connect, publish]
+
+    MintTokenRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId:
+          type: string
+          description: Your end user's id. Becomes the JWT `sub`.
+        claims:
+          type: object
+          description: Opaque claims bag; travels with the token and is visible to your config's authorization logic.
+          additionalProperties: true
+        channels:
+          $ref: "#/components/schemas/ChannelGrants"
+        ttl:
+          type: string
+          description: |
+            Token lifetime. Accepts `1h`, `30m`, `45s`, `2d`, or a bare number of
+            seconds. Defaults to one hour.
+          example: 1h
+      additionalProperties: false
+
+    MintAnonymousTokenRequest:
+      type: object
+      properties:
+        channels:
+          $ref: "#/components/schemas/ChannelGrants"
+          description: Secret-key path only. Rejected on the publishable-key path.
+        ttl:
+          type: string
+          description: Secret-key path only. Rejected on the publishable-key path.
+          example: 30m
+        anonId:
+          type: string
+          pattern: '^anon_[A-Za-z0-9_-]{22}$'
+          description: |
+            Optional, both paths. Must match the `anon_...` id format exactly. When
+            present, it is reused as the token subject so an SDK can re-mint on
+            expiry for the same anonymous identity. When absent, a fresh id is
+            generated.
+          example: anon_Vk8v2pBpHx7mJ9sXkFq3Qw
+      additionalProperties: false
+
+    TokenResponse:
+      type: object
+      required: [token, expiresAt]
+      properties:
+        token:
+          type: string
+          description: The signed Portal JWT.
+        expiresAt:
+          type: string
+          format: date-time
+          description: Token expiry (RFC 3339).
+      additionalProperties: false
+
+    # ── Messages ──
+
+    Mention:
+      type: object
+      required: [userId]
+      properties:
+        userId:
+          type: string
+          description: The mentioned user's id, or the platform tokens `@everyone` / `@channel` (membership channels, capability-gated, rate-limited).
+      additionalProperties: false
+
+    ServerPublishRequest:
+      type: object
+      required: [senderId, content]
+      description: |
+        Server publish body — used on the control plane with a secret key.
+        Pre-trusted: bypasses your config's publish middleware and authorization.
+      properties:
+        senderId:
+          type: string
+          description: The sender's user id. Required on the server path (there is no user JWT to derive it from).
+        type:
+          type: string
+          description: Userland discriminator. Defaults to `message`.
+          default: message
+        content:
+          description: The message payload. Opaque to the platform; ≤ 2 KB.
+        kind:
+          type: string
+          description: Content class. Defaults to `text` (the only value in v1).
+          default: text
+        to:
+          type: string
+          description: A member's user id. Set this to deliver to that member only (no broadcast) and write them an inbox item.
+        mentions:
+          type: array
+          items: { $ref: "#/components/schemas/Mention" }
+          description: Declared mentions. The platform verifies each is a member, dedupes, and caps the count.
+      additionalProperties: false
+
+    ClientPublishRequest:
+      type: object
+      required: [content]
+      description: |
+        Client publish body — used on the realtime edge with a user JWT. The sender
+        is the token's subject (omit `senderId`). Subject to your config's
+        authorization and publish middleware.
+      properties:
+        type:
+          type: string
+          description: Userland discriminator. Defaults to `message`.
+          default: message
+        content:
+          description: The message payload. Opaque to the platform; ≤ 2 KB.
+        kind:
+          type: string
+          description: Content class. Defaults to `text` (the only value in v1).
+          default: text
+        to:
+          type: string
+          description: A member's user id. Set this to deliver to that member only (no broadcast) and write them an inbox item.
+        mentions:
+          type: array
+          items: { $ref: "#/components/schemas/Mention" }
+          description: Declared mentions. The platform verifies each is a member, dedupes, and caps the count.
+      additionalProperties: false
+
+    SendAck:
+      type: object
+      required: [id, seq, timestamp]
+      properties:
+        id:
+          type: string
+          description: Platform-assigned message id. Unique within the channel.
+        seq:
+          type: integer
+          description: Per-channel sequence number, contiguous within a connection's delivery stream.
+        timestamp:
+          type: integer
+          description: Epoch milliseconds (platform clock).
+      additionalProperties: false
+
+    WireSender:
+      type: object
+      required: [id, anon]
+      properties:
+        id:
+          type: string
+          description: The sender's user id (or anonymous id).
+        anon:
+          type: boolean
+          description: Whether the sender is anonymous.
+        username:
+          type: string
+          description: Populated on broadcast channels only (they have no roster to join against).
+      additionalProperties: false
+
+    WireMessage:
+      type: object
+      required: [id, seq, type, kind, content, sender, timestamp, retracted, ephemeral]
+      description: |
+        The message envelope. Retracted messages come back with `retracted: true`
+        and `content: null` (a tombstone). Ephemeral messages are not persisted and
+        carry `seq: null` (they are not returned by history).
+      properties:
+        id:
+          type: string
+          description: Platform-assigned message id. Unique within the channel.
+        seq:
+          type: ["integer", "null"]
+          description: Per-channel sequence number, or `null` for ephemeral messages.
+        type:
+          type: string
+          description: Userland discriminator.
+        kind:
+          type: string
+          description: Content class (`text` in v1).
+        content:
+          description: The message payload, opaque to the platform. Any JSON value, including `null` for retracted messages.
+        sender:
+          $ref: "#/components/schemas/WireSender"
+        timestamp:
+          type: integer
+          description: Epoch milliseconds.
+        to:
+          type: string
+          description: Present when the message was delivered to a single recipient (`to:`-send).
+        mentions:
+          type: array
+          items: { $ref: "#/components/schemas/Mention" }
+        retracted:
+          type: boolean
+          description: Whether the message was retracted after publish.
+        ephemeral:
+          type: boolean
+          description: Whether the message is ephemeral (not persisted, no `seq`).
+      additionalProperties: false
+
+    HistoryResponse:
+      type: object
+      required: [msgs, hasMore]
+      properties:
+        msgs:
+          type: array
+          items: { $ref: "#/components/schemas/WireMessage" }
+        hasMore:
+          type: boolean
+          description: Whether an older page is available (scroll-up paging).
+      additionalProperties: false
+
+    # ── Members ──
+
+    MemberRow:
+      type: object
+      required: [userId, online, claims]
+      properties:
+        userId:
+          type: string
+        online:
+          type: boolean
+          description: Whether the member is currently connected (merged from live presence).
+        claims:
+          type: object
+          description: The join-time claims snapshot.
+          additionalProperties: true
+      additionalProperties: false
+
+    MembersResponse:
+      type: object
+      required: [members]
+      properties:
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/MemberRow" }
+        cursor:
+          type: string
+          description: Keyset cursor for the next page; absent on the last page.
+      additionalProperties: false
+
+    AddMemberSingle:
+      type: object
+      required: [userId]
+      properties:
+        userId:
+          type: string
+        claims:
+          type: object
+          description: Optional display snapshot (for example `username`, `avatar`).
+          additionalProperties: true
+      additionalProperties: false
+
+    AddMemberBatch:
+      type: object
+      required: [members]
+      properties:
+        members:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/AddMemberSingle" }
+      additionalProperties: false
+
+    AddMembersResponse:
+      type: object
+      required: [added]
+      properties:
+        added:
+          type: integer
+          description: The number of members added (upserts of existing members count).
+      additionalProperties: false
+
+    BanRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          description: Optional ban expiry (RFC 3339). Omit for a ban that does not auto-expire.
+      additionalProperties: false
+
+    # ── Notifications ──
+
+    NotifyRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          description: Userland notification type (for example `ticket.assigned`, `mention`).
+        title:
+          type: string
+          description: Optional human-readable title.
+        data:
+          description: Optional userland payload, opaque to the platform.
+      additionalProperties: false
+
+    NotifyResponse:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: The inbox item id (or the idempotency key, if you supplied one).
+      additionalProperties: false
+
+    # ── Deploys ──
+
+    HooksManifest:
+      type: object
+      description: What hooks a channel's config references (capabilities only, never code).
+      properties:
+        authz:
+          type: boolean
+          description: Whether the channel runs custom authorization on connect/publish.
+        onPublish:
+          type: integer
+          description: The number of `onPublish` hooks in the chain.
+        onDisconnect:
+          type: integer
+          description: The number of `onDisconnect` hooks.
+        notify:
+          type: boolean
+          description: Whether a `notify` hook is wired.
+      additionalProperties: false
+
+    ExtensionManifest:
+      type: object
+      required: [script, namespace, transport]
+      description: A channel extension attachment.
+      properties:
+        script:
+          type: string
+          description: The bundled extension script name.
+        namespace:
+          type: string
+          description: The extension namespace (for example `poll.`).
+        transport:
+          type: string
+          description: The extension transport (for example `ws`).
+      additionalProperties: false
+
+    ChannelConfig:
+      type: object
+      required: [mode, anonymous, hooks, extensions]
+      properties:
+        mode:
+          type: string
+          enum: [standard, broadcast]
+          description: Channel mode. `standard` has a roster and presence; `broadcast` does not.
+        anonymous:
+          type: boolean
+          description: Whether anonymous users may connect.
+        hooks:
+          $ref: "#/components/schemas/HooksManifest"
+        extensions:
+          type: object
+          description: Extensions attached to this channel, keyed by handle. Namespaces must be exclusive within a channel.
+          additionalProperties:
+            $ref: "#/components/schemas/ExtensionManifest"
+      additionalProperties: false
+
+    ProjectAuthConfig:
+      type: object
+      required: [issuer, jwksUrl, claimMap]
+      description: Optional external JWT verification (bring-your-own-JWT).
+      properties:
+        issuer:
+          type: string
+        jwksUrl:
+          type: string
+        claimMap:
+          type: object
+          description: Maps external claims to Portal claims.
+          additionalProperties: { type: string }
+      additionalProperties: false
+
+    ConfigExtract:
+      type: object
+      required: [version, project, channels]
+      description: The declarative configuration uploaded by `portal deploy`.
+      properties:
+        version:
+          type: string
+          description: The config format version.
+        project:
+          type: object
+          required: [webhooks]
+          properties:
+            auth:
+              oneOf:
+                - $ref: "#/components/schemas/ProjectAuthConfig"
+                - type: "null"
+              description: Optional external auth config. `null` uses Portal-minted JWTs.
+            webhooks:
+              type: ["string", "null"]
+              description: Reserved. Must be `null` in v1 (webhooks are a future addition).
+          additionalProperties: false
+        channels:
+          type: object
+          description: Channel configs, keyed by channel id (exact id or `*` template; most-specific wins).
+          additionalProperties:
+            $ref: "#/components/schemas/ChannelConfig"
+      additionalProperties: false
+
+    DeployScript:
+      type: object
+      required: [name, content]
+      properties:
+        name:
+          type: string
+          description: The bundled script name.
+        content:
+          type: string
+          description: The bundled script source.
+      additionalProperties: false
+
+    ExtensionScript:
+      type: object
+      required: [key, handle, name, content]
+      properties:
+        key:
+          type: string
+          description: The channel key the extension attaches to.
+        handle:
+          type: string
+          description: The extension handle.
+        name:
+          type: string
+          description: The bundled script name.
+        content:
+          type: string
+          description: The bundled script source.
+      additionalProperties: false
+
+    DeployRequest:
+      type: object
+      required: [extract]
+      properties:
+        extract:
+          $ref: "#/components/schemas/ConfigExtract"
+        hookScript:
+          allOf:
+            - $ref: "#/components/schemas/DeployScript"
+          description: Optional bundled hooks script, if your config references hooks.
+        extensionScripts:
+          type: array
+          items: { $ref: "#/components/schemas/ExtensionScript" }
+          description: Optional bundled extension scripts, if your config references extensions.
+      additionalProperties: false
+
+    DeployResponse:
+      type: object
+      required: [versionId]
+      properties:
+        versionId:
+          type: string
+          description: The content-addressed version id (`cfg_...`). Stable — identical content always yields the same id.
+      additionalProperties: false
+
+    DeployRecord:
+      type: object
+      required: [id, configVersionId, action, createdAt]
+      properties:
+        id:
+          type: string
+        configVersionId:
+          type: string
+        action:
+          type: string
+          enum: [deploy, rollback]
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    ListDeploysResponse:
+      type: object
+      required: [deploys]
+      properties:
+        deploys:
+          type: array
+          items: { $ref: "#/components/schemas/DeployRecord" }
+      additionalProperties: false
+
+    ActiveConfigResponse:
+      type: object
+      required: [versionId, extract, activatedAt]
+      properties:
+        versionId:
+          type: string
+        extract:
+          $ref: "#/components/schemas/ConfigExtract"
+        activatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    # ── Secrets ──
+
+    PutSecretRequest:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: The secret value. Injected into your config's runtime; never stored in the control plane beyond its name.
+      additionalProperties: false
+
+    SecretRow:
+      type: object
+      required: [name, createdAt, updatedAt]
+      properties:
+        name:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    ListSecretsResponse:
+      type: object
+      required: [secrets]
+      properties:
+        secrets:
+          type: array
+          items: { $ref: "#/components/schemas/SecretRow" }
+          description: Secret names and timestamps. Never values.
+      additionalProperties: false
