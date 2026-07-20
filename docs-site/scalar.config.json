@@ -6,7 +6,7 @@
     "description": "Realtime channels and inbox for your product. Docs for @portalsdk/core, @portalsdk/react, and the Portal config & CLI."
   },
   "siteConfig": {
-    "subdomain": "portal",
+    "subdomain": "portalsdk",
     "customDomain": "docs.useportal.co",
     "theme": "default"
   },
