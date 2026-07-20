@@ -18,12 +18,13 @@ function InboxBadge() {
 
 ## Params
 
-`useInbox(params?: InboxQuery<D>)` takes the same query shape as `inbox.view()` in core:
+`useInbox(params?)` takes the same query shape as `inbox.view()` in core, plus `onItem`:
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `channelId` | `string` | Scope the whole view (items + entry) to one channel. |
 | `where` | `InboxWhere<D>` | Filter items by scalar fields of your item data, plus `type`, `channelId`, `read`, `muted`. |
+| `onItem` | `(item: InboxItem<D>) => void` | Fires once per item arriving after mount. |
 
 ```tsx
 import { useInbox } from "@portalsdk/react";
@@ -84,28 +85,36 @@ function InboxPanel() {
 }
 ```
 
-## No `onItem` callback
+## Reacting to arrival with `onItem`
 
-Unlike `useChannel`'s `onMention`/`onError`, `useInbox` doesn't expose a callback for
-"a new item just arrived" — only the accumulated, reactive `items` array. If you need to
-react to arrival as a one-shot event (a toast, a sound, an analytics call), reach for the
-core client directly:
+`items` is the accumulated, reactive list — right for rendering a panel. For a one-shot
+reaction to a new item arriving (a toast, a sound, an analytics call), use `onItem` instead
+of diffing `items` yourself:
 
 ```tsx
-import { useEffect } from "react";
-import type { Portal, InboxItem } from "@portalsdk/core";
+import { useInbox } from "@portalsdk/react";
 
-function useOnInboxItem(portal: Portal, onItem: (item: InboxItem) => void) {
-  useEffect(() => {
-    return portal.inbox().on("item", onItem);
-  }, [portal, onItem]);
+function InboxToaster() {
+  useInbox({
+    onItem: (item) => {
+      if (item.type === "ticket.assigned") showToast(item.title ?? "New assignment");
+    },
+  });
+  return null;
 }
+
+function showToast(_message: string) {}
 ```
 
-See [In-app notifications](/guides/in-app-notifications) for this pattern applied to a
-toast, and [Inbox](/core/inbox#reacting-to-new-items) for the underlying core event.
+Firing semantics, inherited from [the underlying core event](/core/inbox#reacting-to-new-items):
 
-> **Surface gap:** `InboxHandle.on("item", …)` exists in `@portalsdk/core`, but
-> `@portalsdk/react`'s published `useInbox` (`0.1.1`) doesn't surface an equivalent
-> `onItem` option. The hook above works around it by going through the core client
-> directly, alongside `useInbox` for the rest of the inbox state.
+- **Never fires for the items already present when the inbox becomes ready** — only for a
+  genuinely new arrival after that. Render the initial backlog from `items` instead.
+- **Never fires twice for the same item** — a redelivered item updates its data in `items`
+  but doesn't re-announce itself. `item.id` is the notification's idempotency key, so this
+  falls out of the same guarantee.
+- **Stable-ref**: passing a fresh inline callback on every render doesn't drop a
+  subsequently-arriving item and doesn't re-subscribe.
+
+See [In-app notifications](/guides/in-app-notifications) for this pattern applied to a full
+toast component with dismiss handling.

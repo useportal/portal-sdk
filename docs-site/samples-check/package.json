@@ -8,8 +8,8 @@
     "check": "node check-samples.mjs"
   },
   "devDependencies": {
-    "@portalsdk/core": "0.1.3",
-    "@portalsdk/react": "0.1.1",
+    "@portalsdk/core": "0.1.4",
+    "@portalsdk/react": "0.1.2",
     "@portalsdk/config": "0.1.2",
     "@types/react": "^18.3.0",
     "react": "^18.3.0",
