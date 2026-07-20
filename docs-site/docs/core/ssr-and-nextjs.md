@@ -1,15 +1,20 @@
 # SSR & Next.js
 
-Both `@portalsdk/core` and `@portalsdk/react` are client-only. `@portalsdk/core` isn't
-meant for server components; `@portalsdk/react`'s hooks connect over WebSockets and read
-the DOM, so they ship a `"use client"` directive and throw if they run during
-server-side rendering or inside a React Server Component. **There is no SSR support in
-v1.**
+Both `@portalsdk/core` and `@portalsdk/react` are client-only — meant to run in a browser,
+not inside server code. Only `@portalsdk/react`'s dist ships a `"use client"` directive
+(`@portalsdk/core` has no React dependency and doesn't need one; its hooks are the actual
+Client Component boundary).
+
+**`@portalsdk/react`'s hooks are SSR-inert, not throwing.** During server rendering
+(`typeof window === "undefined"` — which includes a Next.js Client Component's server
+prerender pass, which runs despite `"use client"`), `useChannel`/`useInbox` render a stable
+idle snapshot instead of connecting: no `acquire()`, no network, nothing thrown. On an actual
+client this never engages — behavior there is unchanged.
 
 ## App Router
 
-In the Next.js App Router, that means: render anything that touches `useChannel` or
-`useInbox` from a Client Component.
+Render anything that touches `useChannel` or `useInbox` from a Client Component, same as any
+other stateful hook — no special wrapper is required:
 
 ```tsx
 // file: chat-room.tsx
@@ -55,7 +60,18 @@ export default function ChatPage() {
 The same applies to `PortalProvider` — see [PortalProvider](/react/provider) for where
 to put the client instance and provider in an App Router tree.
 
-Beyond "these are Client Components, and there's no SSR/RSC support," the published
-packages don't document any App Router–specific integration (there's no framework
-adapter, no `next/dynamic`/`ssr: false` guidance, and no hydration workaround shipped or
-recommended) — treat the snippet above as the whole story for v1.
+## `dynamic(..., { ssr: false })` is not required
+
+That workaround exists for hooks that genuinely can't tolerate running during server
+rendering. Portal's hooks can: during the server's prerender pass, `ChatRoom` above renders
+its inert idle state (`status: "idle"`, empty `messages`) rather than throwing or connecting;
+once the same component re-renders in the browser, it connects normally. You only need
+`ssr: false` here for reasons unrelated to Portal — e.g. another dependency in the same
+component that itself doesn't tolerate server rendering.
+
+## Hydration
+
+`useSyncExternalStore`'s `getServerSnapshot` argument is wired to the same idle snapshot the
+hook renders during SSR. Since no handle is created server-side, the client's first
+(pre-hydration-effects) render produces the identical inert shape too — so there's nothing
+for React to warn about mismatching between server and client output.

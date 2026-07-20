@@ -64,15 +64,17 @@ async function assignTicket(
 }
 ```
 
-## Client-side: list, and a deduplicated toast
+## Client-side: list, and a toast on arrival
 
-`InboxItem.id` is the event's idempotency key — stable across redelivery — so a toast
-hook keys its "already shown" set on it, not on array position or arrival order:
+`useInbox`'s `onItem` fires once per item arriving after mount — never for the backlog
+already present when the inbox becomes ready, and never twice for the same item, since
+`InboxItem.id` is the event's idempotency key and redelivery is deduped by that id. That
+makes it safe to append straight onto a toast list with no dedup bookkeeping of your own:
 
 ```tsx
 // file: use-assignment-toasts.ts
-import { useEffect, useRef, useState } from "react";
-import type { Portal, InboxItem } from "@portalsdk/core";
+import { useState } from "react";
+import { useInbox } from "@portalsdk/react";
 
 interface AssignmentPayload {
   ticketId: string;
@@ -84,23 +86,18 @@ interface Toast {
   message: string;
 }
 
-export function useAssignmentToasts(portal: Portal) {
+export function useAssignmentToasts() {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const seen = useRef(new Set<string>());
 
-  useEffect(() => {
-    return portal.inbox().on("item", (item: InboxItem) => {
+  useInbox<AssignmentPayload>({
+    onItem: (item) => {
       if (item.type !== "ticket.assigned") return;
-      if (seen.current.has(item.id)) return;
-      seen.current.add(item.id);
-
-      const data = item.data as AssignmentPayload;
       setToasts((current) => [
         ...current,
-        { id: item.id, message: item.title ?? `Assigned: ${data.title}` },
+        { id: item.id, message: item.title ?? `Assigned: ${item.data.title}` },
       ]);
-    });
-  }, [portal]);
+    },
+  });
 
   function dismiss(id: string) {
     setToasts((current) => current.filter((t) => t.id !== id));
@@ -112,11 +109,10 @@ export function useAssignmentToasts(portal: Portal) {
 
 ```tsx
 // file: notifications-toaster.tsx
-import type { Portal } from "@portalsdk/core";
 import { useAssignmentToasts } from "./use-assignment-toasts";
 
-export function NotificationsToaster({ portal }: { portal: Portal }) {
-  const { toasts, dismiss } = useAssignmentToasts(portal);
+export function NotificationsToaster() {
+  const { toasts, dismiss } = useAssignmentToasts();
 
   return (
     <div>
@@ -130,10 +126,8 @@ export function NotificationsToaster({ portal }: { portal: Portal }) {
 }
 ```
 
-`useAssignmentToasts` goes through `portal.inbox().on("item", …)` on the core client
-directly rather than `useInbox`, because the published `useInbox` hook exposes the
-accumulated `items`/`counter`/`unseen` state but no arrival *event* to hang a one-shot
-toast off of — see the surface note in [useInbox](/react/use-inbox#no-onitem-callback).
+`useAssignmentToasts` no longer needs the `Portal` client passed in at all — `useInbox`
+reads it from `PortalProvider`'s context on its own, same as any other call to the hook.
 
 ## The persistent list
 

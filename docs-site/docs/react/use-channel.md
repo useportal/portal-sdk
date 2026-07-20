@@ -39,6 +39,7 @@ function ChatRoom({ channelId }: { channelId: string }) {
 | `metadata` | `Record<string, unknown>` | Initial presence metadata for this session. |
 | `where` | `MessageWhere<M>` | Reserved surface — typed, but rejected at runtime in v1 (`NotYetSupportedError`). |
 | `onMention` | `(msg: Message<M>) => void` | Called when a message's `mentions` include you. |
+| `onMessage` | `(msg: Message<M>) => void` | Called on every message delivered to this channel, persistent or ephemeral. |
 | `onError` | `(err: PortalError) => void` | Called on channel errors. |
 
 ### The two-pane pattern
@@ -75,9 +76,9 @@ branch above the hook call.
 
 `useChannel` returns `UseChannelResult<M>`: `messages`, `send`, `loadPrevious`,
 `isLoadingPrevious`, `hasPrevious`, `channel`, `me`, `presence`, `activity`,
-`sendActivity`, `typing`, `sendTyping`, `unread`, `markAsRead`, and `status` — mirroring
-the [core channel surface](/core/channels) field-for-field. Import the type directly if
-you want to name it, e.g. to type a prop:
+`sendActivity`, `typing`, `sendTyping`, `unread`, `markAsRead`, `setMetadata`, and
+`status` — mirroring the [core channel surface](/core/channels) field-for-field. Import
+the type directly if you want to name it, e.g. to type a prop:
 
 ```tsx
 import type { UseChannelResult } from "@portalsdk/react";
@@ -145,3 +146,41 @@ function ChatRoom({ channelId }: { channelId: string }) {
   );
 }
 ```
+
+## Reacting to every message, and updating presence metadata
+
+`onMessage` fires on every message delivered to the channel — persistent or ephemeral —
+which is the right tool for high-frequency ephemeral traffic (live cursors, transient
+signals) that you want to react to as discrete events rather than read off the accumulated
+`messages` array. `setMetadata` replaces your own presence metadata mid-session — a direct
+pass-through to the channel handle's `setMetadata`:
+
+```tsx
+import type { PointerEvent } from "react";
+import { useChannel } from "@portalsdk/react";
+
+interface CursorPosition {
+  x: number;
+  y: number;
+}
+
+function LiveCursor({ channelId }: { channelId: string }) {
+  const { setMetadata, send } = useChannel<CursorPosition>({
+    channelId,
+    onMessage: (msg) => {
+      if (msg.ephemeral) console.log("cursor from", msg.sender.id, msg.content);
+    },
+  });
+
+  function onPointerMove(e: PointerEvent<HTMLDivElement>) {
+    const position = { x: e.clientX, y: e.clientY };
+    void send({ ephemeral: true, content: position });
+    setMetadata({ cursor: position });
+  }
+
+  return <div onPointerMove={onPointerMove} style={{ width: "100%", height: "100%" }} />;
+}
+```
+
+See [Guides → Live cursors](/guides/live-cursors) for the full pattern, including why you'd
+combine ephemeral sends with throttled presence metadata rather than using just one.

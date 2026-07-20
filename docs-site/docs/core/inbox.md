@@ -134,10 +134,8 @@ inbox.on("change", () => {
 unsubscribe();
 ```
 
-> **Surface note:** this `"item"` event exists on the core `InboxHandle` but is not
-> currently surfaced through the `useInbox` React hook (see
-> [useInbox](/react/use-inbox)) — reach for `portal.inbox().on("item", …)` directly if
-> you need it from a React app.
+If you're using React, [`useInbox`](/react/use-inbox)'s `onItem` param wraps this event
+directly — no need to reach for the core client yourself.
 
 ## Store contract
 
@@ -154,8 +152,13 @@ function render(_snapshot: InboxSnapshot) {}
 
 inbox.subscribe(() => render(inbox.getSnapshot()));
 inbox.getSnapshot(); // { channels, items, counter, status }
-inbox.status; // "connecting" | "ready" | "reconnecting"
+inbox.status; // InboxStatus: "connecting" | "ready" | "reconnecting" (a live inbox is never "idle" — see below)
 ```
+
+`InboxStatus` also includes `"idle"`, for consumers that model a handle that hasn't been
+created at all — `portal.inbox()` itself is never `"idle"` (it's at least `"connecting"` from
+the moment it's created); `@portalsdk/react`'s SSR-inert `useInbox` is the one place that
+value actually appears (see [SSR & Next.js](/core/ssr-and-nextjs)).
 
 If you're using React, [`useInbox`](/react/use-inbox) wraps the global handle and a
 filtered view together.

@@ -19,6 +19,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DOCS_ROOT = join(HERE, "..", "docs");
 const GENERATED_ROOT = join(HERE, ".generated");
 
+const PACKAGE_JSON = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8"));
+const PINNED_PACKAGES = ["@portalsdk/core", "@portalsdk/react", "@portalsdk/config"];
+
 const FENCE_RE = /```(ts|tsx)\r?\n([\s\S]*?)```/g;
 const FILE_MARKER_RE = /^\/\/\s*file:\s*(\S+)\s*\r?\n/;
 
@@ -113,8 +116,11 @@ function main() {
     process.exit(result.status ?? 1);
   }
 
+  const pins = PINNED_PACKAGES.map(
+    (name) => `${name}@${PACKAGE_JSON.devDependencies?.[name] ?? "?"}`,
+  ).join(", ");
   console.log(`\nAll ${total} sample(s) typecheck cleanly against:`);
-  console.log("  @portalsdk/core@0.1.3, @portalsdk/react@0.1.1, @portalsdk/config@0.1.2");
+  console.log(`  ${pins}`);
 }
 
 main();
