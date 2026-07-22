@@ -34,6 +34,7 @@ function defaultSnapshot<M>(): ChannelSnapshot<M> {
     unread: 0,
     info: undefined,
     me: undefined,
+    ext: undefined,
     isLoadingPrevious: false,
     hasPrevious: true,
   };
@@ -83,6 +84,9 @@ export function makeFakeChannel<M = unknown>(): FakeChannel<M> {
     },
     get me() {
       return snapshot.me;
+    },
+    get ext() {
+      return snapshot.ext;
     },
     members: vi.fn(async () => []),
     setMetadata: vi.fn(),

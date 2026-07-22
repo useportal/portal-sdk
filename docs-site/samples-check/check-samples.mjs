@@ -20,7 +20,12 @@ const DOCS_ROOT = join(HERE, "..", "docs");
 const GENERATED_ROOT = join(HERE, ".generated");
 
 const PACKAGE_JSON = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8"));
-const PINNED_PACKAGES = ["@portalsdk/core", "@portalsdk/react", "@portalsdk/config"];
+const PINNED_PACKAGES = [
+  "@portalsdk/core",
+  "@portalsdk/react",
+  "@portalsdk/config",
+  "@portalsdk/extension-protocol",
+];
 
 const FENCE_RE = /```(ts|tsx)\r?\n([\s\S]*?)```/g;
 const FILE_MARKER_RE = /^\/\/\s*file:\s*(\S+)\s*\r?\n/;

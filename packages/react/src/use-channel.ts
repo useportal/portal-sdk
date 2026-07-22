@@ -23,6 +23,7 @@ const INERT_SNAPSHOT: ChannelSnapshot<never> = Object.freeze({
   unread: 0,
   info: undefined,
   me: undefined,
+  ext: undefined,
   isLoadingPrevious: false,
   hasPrevious: false,
 });
@@ -166,6 +167,7 @@ export function useChannel<M = unknown>(
     hasPrevious: snapshot.hasPrevious,
     channel: snapshot.info,
     me: snapshot.me,
+    ext: snapshot.ext,
     presence: snapshot.presence,
     activity: snapshot.activity,
     sendActivity,

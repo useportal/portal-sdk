@@ -101,6 +101,11 @@
                 "type": "page",
                 "title": "Live cursors",
                 "filepath": "docs/guides/live-cursors.md"
+              },
+              "/extensions": {
+                "type": "page",
+                "title": "Channel extensions",
+                "filepath": "docs/guides/extensions.md"
               }
             }
           },

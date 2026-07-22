@@ -60,6 +60,7 @@ const idleSnapshot = (): ChannelSnapshot => ({
   unread: 0,
   info: undefined,
   me: undefined,
+  ext: undefined,
   isLoadingPrevious: false,
   hasPrevious: true,
 });
@@ -271,6 +272,9 @@ export class ChannelConnection {
       status: "ready",
       info,
       me,
+      // Replaced wholesale, never merged: a handle absent from this frame is a handle whose
+      // extension is degraded or detached, and a stale blob would read as live state.
+      ext: frame.ext,
       messages: this.#buffer.messages(),
       hasPrevious: this.#buffer.hasPrevious(),
       unread: this.#buffer.channelUnread(),
