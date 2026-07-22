@@ -232,6 +232,7 @@ export interface ChannelSnapshot<M = unknown> {
   unread: number;
   info: ChannelInfo | undefined;
   me: { id: string; anon: boolean; claims: Record<string, unknown> } | undefined;
+  ext: Record<string, unknown> | undefined;
   isLoadingPrevious: boolean;
   hasPrevious: boolean;
 }
@@ -279,6 +280,17 @@ export interface ChannelHandle<M = unknown> {
   readonly info: ChannelInfo | undefined;
   /** Own verified claims, post-connect. */
   readonly me: { id: string; anon: boolean; claims: Record<string, unknown> } | undefined;
+  /**
+   * Extension snapshots from the connect frame, keyed by handle — the late-joiner's view of
+   * state that was broadcast before this client connected. `undefined` before `ready`.
+   *
+   * Blobs are owned by the extension that produced them, so they are typed `unknown`; cast at
+   * the read site. A degraded extension is KEY-ABSENT rather than null, so `ext.counter`
+   * being undefined means "no snapshot", never "empty snapshot". The whole record is replaced
+   * on every `ready` (including reconnects), so handles that disappear between sessions do
+   * not linger. Live updates arrive via `on("message")`, not here.
+   */
+  readonly ext: Record<string, unknown> | undefined;
   /** Standard channels: fetched directory (incl. offline), `online` merged. Not live state. */
   members(): Promise<MemberRow[]>;
   /**

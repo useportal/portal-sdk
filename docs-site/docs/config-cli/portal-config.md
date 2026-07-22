@@ -275,13 +275,25 @@ An extension declares what it owns through a static manifest. Use `defineExtensi
 that manifest is type-checked:
 
 ```ts
-import { defineExtension, type ExtensionManifest } from "@portalsdk/config";
+import {
+  defineExtension,
+  type BatchRequest,
+  type ExtensionManifest,
+} from "@portalsdk/config";
 
 class Polls {
   static manifest: ExtensionManifest = {
     namespace: "poll.", // every message type this extension owns starts with "poll."
     transport: "ws",
   };
+
+  // The one required handler: Portal calls it with each batch of messages
+  // published to this namespace. See the extensions guide for a complete example.
+  async onBatch({ messages }: BatchRequest) {
+    for (const message of messages) {
+      console.log(message.type, message.content);
+    }
+  }
 }
 
 export default defineExtension(Polls);

@@ -75,9 +75,11 @@ branch above the hook call.
 ## Result
 
 `useChannel` returns `UseChannelResult<M>`: `messages`, `send`, `loadPrevious`,
-`isLoadingPrevious`, `hasPrevious`, `channel`, `me`, `presence`, `activity`,
+`isLoadingPrevious`, `hasPrevious`, `channel`, `me`, `ext`, `presence`, `activity`,
 `sendActivity`, `typing`, `sendTyping`, `unread`, `markAsRead`, `setMetadata`, and
-`status` — mirroring the [core channel surface](/core/channels) field-for-field. Import
+`status` — mirroring the [core channel surface](/core/channels) field-for-field. `ext`
+carries extension snapshots for late joiners; see the
+[extensions guide](/guides/extensions). Import
 the type directly if you want to name it, e.g. to type a prop:
 
 ```tsx

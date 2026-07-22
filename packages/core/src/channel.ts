@@ -163,6 +163,9 @@ export class ChannelHandleImpl implements ChannelHandle<unknown> {
   get me(): ChannelSnapshot["me"] {
     return this.getSnapshot().me;
   }
+  get ext(): ChannelSnapshot["ext"] {
+    return this.getSnapshot().ext;
+  }
   get isLoadingPrevious(): boolean {
     return this.getSnapshot().isLoadingPrevious;
   }

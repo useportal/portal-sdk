@@ -50,6 +50,16 @@ export interface UseChannelResult<M = unknown> {
   hasPrevious: boolean;
   channel: ChannelInfo | undefined;
   me: Me | undefined;
+  /**
+   * Extension snapshots from the connect frame, keyed by handle — what a late-joining client
+   * reads to catch up on state broadcast before it connected. `undefined` while inert (no
+   * channel selected, or during server rendering) and until `ready` lands.
+   *
+   * Blobs are extension-owned, so they are typed `unknown`; cast at the read site. A degraded
+   * extension is key-absent rather than null. Re-rendering follows the store: every `ready`
+   * (including reconnects) replaces the record wholesale.
+   */
+  ext: Record<string, unknown> | undefined;
   presence: DetailedPresence | AggregatePresence | undefined;
   activity: readonly ActivityEntry[];
   sendActivity: (kind: string) => void;
