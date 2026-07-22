@@ -19,6 +19,12 @@ jobs:
         with:
           node-version: 24
 
+      # Runs before samples-check installs anything: if a release was published only
+      # partially, this names the missing version and who references it, instead of
+      # letting `npm ci` below fail with an opaque ETARGET.
+      - name: Check registry closure
+        run: node scripts/check-registry-closure.mjs
+
       - name: Install samples-check dependencies
         working-directory: docs-site/samples-check
         run: npm ci

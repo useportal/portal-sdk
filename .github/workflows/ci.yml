@@ -55,3 +55,13 @@ jobs:
           echo "Conformance suites will skip until working-context/m3-frames.json is provided."
 
       - run: pnpm -r test
+
+      # Catch a partially-published release on the PR that would merge it, rather than
+      # after merge when publish-docs runs. See RELEASING.md — publish before merging a
+      # PR that pins samples-check to a new version.
+      #
+      # Deliberately LAST: this checks the state of the registry, not of this diff. A
+      # release that is mid-publish would otherwise mask the build/typecheck/test signal
+      # for every unrelated PR. Ordering only matters in publish-docs.yml, where it must
+      # precede samples-check's npm ci.
+      - run: node scripts/check-registry-closure.mjs
