@@ -1,3 +1,5 @@
+# The published copy lives at the portalsdk repo docs-site/openapi/openapi.yaml; copy on every change to this file (manual sync).
+# Scalar's build fails entirely on any nav-referenced missing file.
 openapi: 3.1.0
 info:
   title: Portal Public API
@@ -80,6 +82,8 @@ tags:
     description: Manage runtime secret values for your deployed config.
   - name: Dashboard
     description: Dashboard-session routes (Clerk), surfaced for integrators where useful.
+  - name: CLI Authentication
+    description: Device-authorization flow used by `portal login` to sign the CLI in as a user.
 
 security:
   - secretKey: []
@@ -164,16 +168,22 @@ paths:
         apply. This path is the only route on the control plane that is
         browser-CORS-enabled, scoped to the environment's registered allowed
         origins (loopback is always allowed). It is coarsely rate-limited per key.
+        An Origin that resolves to a real environment but isn't registered for it
+        gets `403 origin_not_allowed` instead of a token (see the `Forbidden`
+        response).
 
         `anonId` (optional, both paths) must match the `anon_...` id format
         exactly. When present it is reused as the token subject, so an SDK can
         re-mint on expiry for the **same** anonymous identity. When absent, a fresh
         id is generated and returned as the token subject.
 
-        > A browser preflight (`OPTIONS`) does not carry the auth header, so for
-        > preflight env-resolution only the publishable key may also be sent as the
-        > `?key=pk_...` query parameter. The actual `POST` still requires the key in
-        > a header.
+        > A browser preflight (`OPTIONS`) never carries the credential's value (only
+        > the header NAME it intends to send), so the environment can't be resolved
+        > there — preflight is permissive instead (`204` + ACAO for any Origin).
+        > Enforcement is entirely on the actual `POST`, where the credential is
+        > present in a header (`?key=pk_...` also still works there, kept for
+        > compatibility, though it was never an auth path — only a CORS-resolution
+        > one).
       security:
         - secretKey: []
         - publishableKey: []
@@ -305,7 +315,7 @@ paths:
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
-          description: Forbidden. `forbidden` (secret key used from a browser, or a publishable key on a secret-only path), `not_permitted` (your config's authorization denied the publish or the direct send), `banned` (the sender is banned from this channel), or `not_member` (a `to:` recipient is not a channel member).
+          description: Forbidden. `forbidden` (secret key used from a browser, or a publishable key on a secret-only path), `not_permitted` (your config's authorization denied the publish or the direct send), `banned` (the sender is banned from this channel), `not_member` (a `to:` recipient is not a channel member), or `origin_not_allowed` (client hot-path only — the caller's browser Origin resolved to a real environment but isn't on its allowed-origins list; carries ACAO for that same Origin so the message is readable).
           headers:
             x-portal-error:
               $ref: "#/components/headers/XPortalError"
@@ -322,6 +332,12 @@ paths:
                   value:
                     code: banned
                     reason: sender is banned from this channel
+                origin_not_allowed:
+                  value:
+                    code: origin_not_allowed
+                    reason: >-
+                      This origin is not registered for your environment. Run: portal
+                      origins add https://app.example.com --env env_123
         "413": { $ref: "#/components/responses/ContentTooLarge" }
         "422": { $ref: "#/components/responses/BlockedByMiddleware" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -921,6 +937,354 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # ── CLI Authentication (device flow) ──────────────────────
+
+  /v1/device/start:
+    post:
+      operationId: startDeviceAuthorization
+      tags: [CLI Authentication]
+      servers:
+        - url: https://api.useportal.co
+      summary: Begin a CLI login
+      description: |
+        Starts a device-authorization request. **No authentication** — the caller
+        is a CLI that has no credential yet, which is the point of the flow; the
+        route is rate-limited per IP instead.
+
+        Returns two codes with different jobs. The `deviceCode` is high-entropy,
+        stays on the machine, and is the credential for `POST /v1/device/poll`.
+        The `userCode` is short enough to read off a terminal and retype in a
+        browser at `verificationUri`. Both die after `expiresIn` seconds.
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Label for the machine logging in, shown to the person approving. Typically the hostname.
+                  example: rodrigo-macbook
+      responses:
+        "200":
+          description: Device authorization started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceStartResponse" }
+              examples:
+                default:
+                  value:
+                    deviceCode: 8f3c1d9e2b7a45f0a1c6e8d4b2f7093a5c1e6d8b4a2f7c093
+                    userCode: K7WQ3MTD
+                    verificationUri: https://app.useportal.co/authorize-cli
+                    interval: 5
+                    expiresIn: 600
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/device/poll:
+    post:
+      operationId: pollDeviceAuthorization
+      tags: [CLI Authentication]
+      servers:
+        - url: https://api.useportal.co
+      summary: Poll for the result of a CLI login
+      description: |
+        Asks whether the person has approved yet. **No authentication** — the
+        `deviceCode` is itself the credential.
+
+        Poll no faster than the `interval` returned by `/v1/device/start`;
+        polling early returns `429` with `reason: "slow_down"`, and the client
+        should increase its interval before trying again.
+
+        **The token is returned exactly once.** The first poll after approval
+        creates the CLI token and returns it; every later poll returns
+        `{"status": "approved"}` with no `token` field. There is no way to
+        retrieve it again — a client that loses it must start a new login.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceCode]
+              properties:
+                deviceCode:
+                  type: string
+                  description: The device code from `/v1/device/start`.
+      responses:
+        "200":
+          description: The current state of the request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DevicePollResponse" }
+              examples:
+                pending:
+                  summary: Nobody has decided yet — keep polling
+                  value: { status: pending }
+                approved:
+                  summary: Approved, first poll — the token, returned once
+                  value:
+                    status: approved
+                    token: pcli_Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZg
+                    expiresAt: "2026-10-17T12:00:00.000Z"
+                alreadyClaimed:
+                  summary: Approved, but the token was already delivered
+                  value: { status: approved }
+                denied:
+                  summary: The person declined the request
+                  value: { status: denied }
+                expired:
+                  summary: Nobody acted within the time limit
+                  value: { status: expired }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429":
+          description: Polled faster than the advertised `interval`. Back off and retry.
+          headers:
+            x-portal-error: { $ref: "#/components/headers/XPortalError" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              examples:
+                default:
+                  value: { code: rate_limited, reason: slow_down }
+
+  /v1/device/lookup:
+    post:
+      operationId: lookupDeviceAuthorization
+      tags: [CLI Authentication]
+      servers:
+        - url: https://api.useportal.co
+      summary: Describe a pending CLI login (Clerk session only)
+      description: |
+        Resolves a `userCode` to what it would authorize, so the dashboard can
+        name the machine before asking the person to decide. **Clerk dashboard
+        session only** — a CLI token (`pcli_...`) is rejected with `403
+        forbidden`. See `POST /v1/device/approve` for why.
+
+        Returns only the CLI-supplied label and the deadline; it never exposes
+        the device code. The `userCode` may be sent in any case, with or without
+        the display hyphen.
+      security:
+        - dashboardSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userCode]
+              properties:
+                userCode: { type: string, example: K7WQ-3MTD }
+      responses:
+        "200":
+          description: The pending request.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deviceRequest:
+                    type: object
+                    properties:
+                      name:
+                        type: [string, "null"]
+                        description: |
+                          The label the CLI sent, or null if it sent none.
+                          **Caller-controlled** — whoever ran `portal login`
+                          chose this string. Present it as a self-reported
+                          claim, never as evidence of who is asking.
+                      requestedFrom:
+                        type: [string, "null"]
+                        description: |
+                          Coarse origin of the machine that started the request
+                          (city, country), derived at the edge and not settable
+                          by the caller. Null when unavailable. Show it — a
+                          request from an unexpected place is the main signal a
+                          person has that a code was relayed to them.
+                      expiresAt: { type: string, format: date-time }
+              examples:
+                default:
+                  value:
+                    deviceRequest:
+                      name: rodrigo-macbook
+                      requestedFrom: Lima, PE
+                      expiresAt: "2026-07-19T12:10:00.000Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: |
+            The caller authenticated with a `pcli_` CLI token. Only a Clerk
+            dashboard session may preview a device login.
+          headers:
+            x-portal-error: { $ref: "#/components/headers/XPortalError" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              examples:
+                default:
+                  value: { code: forbidden, reason: "CLI credentials cannot approve device requests." }
+        "404":
+          description: No live request has that code — unknown, expired, or already decided.
+          headers:
+            x-portal-error: { $ref: "#/components/headers/XPortalError" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              examples:
+                default:
+                  value: { code: not_found }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/device/approve:
+    post:
+      operationId: decideDeviceAuthorization
+      tags: [CLI Authentication]
+      servers:
+        - url: https://api.useportal.co
+      summary: Approve or deny a CLI login (Clerk session only)
+      description: |
+        Records the person's decision. **Clerk dashboard session only** —
+        approving grants the CLI a token that acts as **the calling user**,
+        with the same organization access they have in the dashboard, so this
+        must be called by the human who is logging in from a live browser
+        session.
+
+        A `pcli_` CLI token is rejected here with `403 forbidden`, even one
+        belonging to the same user. This is deliberate: accepting a CLI token
+        would let it approve its own logins, minting fresh 90-day siblings
+        with no human involved and defeating both the TTL and
+        `DELETE /v1/cli-tokens`. This is the one dashboard route where a Clerk
+        session and a CLI token do **not** carry identical authority (see
+        `dashboardSession` vs `cliToken` above).
+
+        A decision is final: once a request is approved or denied, the same
+        `userCode` returns `404` on any further call. Approval does not itself
+        mint the token — the CLI's next poll does.
+
+        > **Approve only a code you generated yourself.** Like every device
+        > grant (RFC 8628 §5.4), this flow cannot bind the machine that started
+        > the login to the person who approves it — the only channel between
+        > them is a code a human carries. Anyone who persuades you to approve
+        > their code receives a 90-day credential acting as **you**, with your
+        > full organization access. A UI built on this route must state that
+        > consequence plainly and show `requestedFrom` from
+        > `/v1/device/lookup`.
+      security:
+        - dashboardSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userCode, approve]
+              properties:
+                userCode: { type: string, example: K7WQ-3MTD }
+                approve:
+                  type: boolean
+                  description: True to authorize the CLI, false to reject it.
+      responses:
+        "200":
+          description: The decision was recorded.
+          content:
+            application/json:
+              schema: { type: object }
+              examples:
+                default: { value: {} }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: |
+            The caller authenticated with a `pcli_` CLI token. A CLI has no
+            legitimate reason to approve its own (or anyone else's) login —
+            only a Clerk dashboard session may.
+          headers:
+            x-portal-error: { $ref: "#/components/headers/XPortalError" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              examples:
+                default:
+                  value: { code: forbidden, reason: "CLI credentials cannot approve device requests." }
+        "404":
+          description: No live request has that code — unknown, expired, or already decided.
+          headers:
+            x-portal-error: { $ref: "#/components/headers/XPortalError" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+              examples:
+                default:
+                  value: { code: not_found }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/cli-tokens/current:
+    delete:
+      operationId: revokeCurrentCliToken
+      tags: [CLI Authentication]
+      servers:
+        - url: https://api.useportal.co
+      summary: Revoke the calling CLI token
+      description: |
+        Revokes the CLI token used to make this request — what `portal logout`
+        calls. It takes no id and cannot reach any other token, so it can never
+        sign out a different machine.
+
+        Requires a CLI token. A Clerk dashboard session has no "current token"
+        and is rejected with `validation_failed`. See `DELETE /v1/cli-tokens`
+        to revoke every token on the account instead of just this one.
+      security:
+        - cliToken: []
+      responses:
+        "200":
+          description: The token is revoked and will no longer authenticate.
+          content:
+            application/json:
+              schema: { type: object }
+              examples:
+                default: { value: {} }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/cli-tokens:
+    delete:
+      operationId: revokeAllCliTokens
+      tags: [CLI Authentication]
+      servers:
+        - url: https://api.useportal.co
+      summary: Revoke every CLI token on the account
+      description: |
+        Revokes every `cli_tokens` row owned by the calling user — not just the
+        one making this request. Idempotent: a call with nothing left to
+        revoke returns `{ "revoked": 0 }`.
+
+        Takes **either** credential type deliberately, for two different jobs:
+        a Clerk dashboard session uses it to evict a compromised CLI fleet; a
+        `pcli_` token uses it to self-destruct along with its siblings (the
+        `portal logout --all` case) — this is safe because the route is
+        destructive-only, it cannot mint a credential, so a leaked token
+        gains no new capability by being allowed to call it.
+      security:
+        - dashboardSession: []
+        - cliToken: []
+      responses:
+        "200":
+          description: How many tokens were revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: integer, minimum: 0 }
+              examples:
+                default: { value: { revoked: 3 } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   # ── Channels: Client (realtime edge, user JWT) ────────────
 
   /v1/channels/{channelId}/history:
@@ -1029,6 +1393,20 @@ components:
       description: |
         Documentation-only marker for a Clerk dashboard session (browser cookie).
         Not a header a client sends programmatically; see the route description.
+    cliToken:
+      type: http
+      scheme: bearer
+      description: |
+        A Portal CLI token (`pcli_...`), obtained by `portal login` and stored at
+        `~/.portal/credentials.json`. It authenticates as the **user** who
+        approved it and carries exactly the authority that user has in the
+        dashboard — it is not scoped to one environment, and it is not a
+        substitute for a secret key on `deploy` / `secrets` routes. Expires after
+        90 days; revoke with `portal logout` (or `portal logout --all` to
+        revoke every CLI token on the account). **Exception:**
+        `POST /v1/device/approve` and `POST /v1/device/lookup` reject this
+        credential — a CLI token cannot approve or preview a device login,
+        only a `dashboardSession` can.
 
   parameters:
 
@@ -1086,9 +1464,11 @@ components:
       required: false
       schema: { type: string }
       description: |
-        Publishable key (`pk_...`), accepted **only** on the CORS preflight
-        (`OPTIONS`) of this route, where the auth header is not sent. The actual
-        `POST` requires the key in a header.
+        Publishable key (`pk_...`) — a CORS-resolution fallback on the actual
+        `POST`, checked alongside the header. Never used on the preflight (which is
+        unconditionally permissive) and never an auth credential on its own: `key`
+        with no header still fails auth, even though CORS gating may still resolve
+        the environment from it.
 
   headers:
 
@@ -1114,8 +1494,13 @@ components:
     Forbidden:
       description: |
         Forbidden. `forbidden` (a secret key was sent from a browser, or a
-        publishable key reached a secret-only path) or `not_permitted` (your
-        config's authorization denied the action).
+        publishable key reached a secret-only path), `not_permitted` (your config's
+        authorization denied the action), or `origin_not_allowed` (a browser Origin
+        that resolved to a real environment isn't registered on its allowed-origins
+        list — `reason` names the exact origin and the fix, `portal origins add
+        <origin> --env <envId>`; unlike other errors this response still carries
+        `Access-Control-Allow-Origin` for that same unregistered Origin, or a
+        browser couldn't read the message either).
       headers:
         x-portal-error: { $ref: "#/components/headers/XPortalError" }
       content:
@@ -1126,6 +1511,12 @@ components:
               value:
                 code: forbidden
                 reason: secret keys must not be used from browsers
+            origin_not_allowed:
+              value:
+                code: origin_not_allowed
+                reason: >-
+                  This origin is not registered for your environment. Run: portal
+                  origins add https://app.example.com --env env_123
 
     NotFound:
       description: The resource was not found.
@@ -1222,7 +1613,14 @@ components:
       description: |
         An error code. The control plane returns the first group; the realtime edge
         additionally returns `invalid_token`, `token_expired`, and `not_member` on
-        the routes included here.
+        the routes included here. `origin_not_allowed` (403) is returned by BOTH
+        hosts to a browser whose Origin isn't registered for the resolved
+        environment (`POST /v1/tokens/anonymous` on the control plane; the client
+        hot-path publish/history/members routes on the realtime edge) — `reason`
+        names the exact origin and the fix (`portal origins add <origin> --env
+        <envId>`). Unlike other errors, this response always carries
+        `Access-Control-Allow-Origin` for the request's own (unregistered) Origin,
+        or a browser couldn't read the message either.
       enum:
         - unauthorized
         - forbidden
@@ -1236,6 +1634,7 @@ components:
         - blocked_by_middleware
         - not_membership_channel
         - version_exists
+        - origin_not_allowed
         - invalid_token
         - token_expired
         - not_member
@@ -1324,6 +1723,60 @@ components:
           type: string
           format: date-time
           description: Token expiry (RFC 3339).
+      additionalProperties: false
+
+    # ── CLI authentication ──
+
+    DeviceStartResponse:
+      type: object
+      required: [deviceCode, userCode, verificationUri, interval, expiresIn]
+      properties:
+        deviceCode:
+          type: string
+          description: |
+            The CLI's half of the request. High-entropy, stored hashed
+            server-side, and never shown to a person — keep it on the machine and
+            send it only to `/v1/device/poll`.
+        userCode:
+          type: string
+          description: |
+            The half a person retypes in the browser. Eight characters from an
+            alphabet with no lookalike pairs; display it grouped (`ABCD-EFGH`)
+            for readability — the server accepts either form, in any case.
+          example: K7WQ3MTD
+        verificationUri:
+          type: string
+          format: uri
+          description: Where to send the person to approve. Append `?code={userCode}` to prefill it.
+        interval:
+          type: integer
+          description: Seconds to wait between polls. Polling faster returns `429 slow_down`.
+          example: 5
+        expiresIn:
+          type: integer
+          description: Seconds until the request can no longer be approved.
+          example: 600
+      additionalProperties: false
+
+    DevicePollResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [pending, approved, denied, expired]
+          description: |
+            `pending` — keep polling. `approved` — the person authorized the CLI.
+            `denied` — they declined. `expired` — nobody acted in time.
+        token:
+          type: string
+          description: |
+            The CLI token (`pcli_...`). Present ONLY on the first poll after
+            approval, and never retrievable again — store it immediately.
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the CLI token expires (90 days out). Present with `token`.
       additionalProperties: false
 
     # ── Messages ──
