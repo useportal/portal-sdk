@@ -80,6 +80,8 @@ tags:
     description: Upload and activate channel configuration.
   - name: Secrets
     description: Manage runtime secret values for your deployed config.
+  - name: Webhooks
+    description: Inspect webhook delivery and retrieve the per-environment signing secret.
   - name: Dashboard
     description: Dashboard-session routes (Clerk), surfaced for integrators where useful.
   - name: CLI Authentication
@@ -892,6 +894,91 @@ paths:
                         updatedAt: "2026-07-18T12:00:00.000Z"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ── Webhooks (v1.5, spec A16) ──────────────────────────────
+
+  /v1/webhooks/deliveries:
+    get:
+      operationId: listWebhookDeliveries
+      tags: [Webhooks]
+      servers:
+        - url: https://api.useportal.co
+      summary: List webhook delivery attempts
+      description: |
+        Returns the webhook delivery ledger for the environment resolved from the
+        secret key. Each row represents one event (`message.published` or
+        `message.retracted`) relayed to the configured webhook endpoint, with its
+        current status (`pending`, `delivered`, or `dropped`), attempt count, and
+        last error (if any). Newest first.
+
+        The ledger IS the dead-letter store: a delivery that exhausts its retry
+        schedule (30s / 5m / 30m / 2h / 6h) is marked `dropped` with `lastError`.
+        Delivered and dropped rows are retained for approximately 7 days.
+
+        Webhook delivery is configured via the `project.webhooks` block in
+        `portal.config.ts`. A per-environment signing secret is minted on first
+        activation of a webhook-bearing config; verify deliveries with
+        `GET /v1/webhooks/secret` and the `portal-signature` header.
+      security:
+        - secretKey: []
+      parameters:
+        - name: status
+          in: query
+          description: Filter by delivery status.
+          schema:
+            type: string
+            enum: [pending, delivered, dropped]
+        - name: limit
+          in: query
+          description: Maximum number of deliveries to return (default 50, max 500).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          description: Delivery ledger entries, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListWebhookDeliveriesResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/webhooks/secret:
+    get:
+      operationId: getWebhookSecret
+      tags: [Webhooks]
+      servers:
+        - url: https://api.useportal.co
+      summary: Get the webhook signing secret
+      description: |
+        Returns the per-environment HMAC signing secret used to sign webhook
+        deliveries. The secret is minted automatically on the first activation of
+        a webhook-bearing config version and is stable across subsequent
+        activations.
+
+        **Verify a delivery** by computing
+        `HMAC-SHA256(secret, "{t}.{rawBody}")` and comparing the hex digest to the
+        `v1` value in the `portal-signature` header (`t=<unix-seconds>,v1=<hex>`).
+      security:
+        - secretKey: []
+      responses:
+        "200":
+          description: The webhook signing secret.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSecretResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No webhook secret found for this environment (webhooks not configured).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
 
   # ── Dashboard (Clerk session) ─────────────────────────────
 
@@ -2116,8 +2203,15 @@ components:
                 - type: "null"
               description: Optional external auth config. `null` uses Portal-minted JWTs.
             webhooks:
-              type: ["string", "null"]
-              description: Reserved. Must be `null` in v1 (webhooks are a future addition).
+              oneOf:
+                - $ref: "#/components/schemas/WebhookConfig"
+                - type: "null"
+              description: |
+                Webhook delivery configuration set via the `webhooks` field of
+                `portal.config.ts`. When set, Portal relays `message.published` and
+                `message.retracted` events for every channel to the given endpoint,
+                signed with a per-environment secret (see `GET /v1/webhooks/secret`).
+                `null` (the default) disables webhook delivery.
           additionalProperties: false
         channels:
           type: object
@@ -2252,4 +2346,76 @@ components:
           type: array
           items: { $ref: "#/components/schemas/SecretRow" }
           description: Secret names and timestamps. Never values.
+      additionalProperties: false
+
+    WebhookConfig:
+      type: object
+      required: [url]
+      description: |
+        Webhook delivery configuration, set via the `webhooks` field of
+        `portal.config.ts` (`@portalsdk/config`'s `WebhookConfig` type). One
+        endpoint per project.
+      properties:
+        url:
+          type: string
+          description: |
+            The endpoint Portal POSTs signed webhook events to. Must use
+            `https` (or `http`, only for `localhost` / `127.0.0.1` / `[::1]`,
+            for local development) and must not resolve to a private or
+            internal address (RFC1918 ranges, link-local, loopback, an
+            `.internal`/`.localhost` TLD, or their IPv6 equivalents) —
+            `portal deploy` rejects the config otherwise.
+      additionalProperties: false
+
+    WebhookDelivery:
+      type: object
+      required: [id, channelId, type, status, attempts, createdAt]
+      properties:
+        id:
+          type: string
+          description: The event id (message id for published, retract_{id} for retracted).
+        channelId:
+          type: string
+        type:
+          type: string
+          enum: [message.published, message.retracted]
+        status:
+          type: string
+          enum: [pending, delivered, dropped]
+        attempts:
+          type: integer
+          description: Number of delivery attempts made so far.
+        lastError:
+          type: string
+          nullable: true
+          description: The last error message (null when delivered on first attempt).
+        createdAt:
+          type: integer
+          description: Epoch-ms when the event was ingested.
+        deliveredAt:
+          type: integer
+          nullable: true
+          description: Epoch-ms when the delivery succeeded (null if pending or dropped).
+        nextAttemptAt:
+          type: integer
+          nullable: true
+          description: Epoch-ms of the next scheduled retry (null if delivered or dropped).
+      additionalProperties: false
+
+    ListWebhookDeliveriesResponse:
+      type: object
+      required: [deliveries]
+      properties:
+        deliveries:
+          type: array
+          items: { $ref: "#/components/schemas/WebhookDelivery" }
+      additionalProperties: false
+
+    WebhookSecretResponse:
+      type: object
+      required: [secret]
+      properties:
+        secret:
+          type: string
+          description: The per-environment HMAC signing secret (prefix `whsec_`).
       additionalProperties: false
