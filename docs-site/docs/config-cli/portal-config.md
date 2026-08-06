@@ -279,7 +279,7 @@ import {
   defineExtension,
   type BatchRequest,
   type ExtensionManifest,
-} from "@portalsdk/config";
+} from "@portalsdk/extension-protocol";
 
 class Polls {
   static manifest: ExtensionManifest = {

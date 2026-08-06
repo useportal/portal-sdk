@@ -118,12 +118,17 @@ inbox re-authenticate in place — see [Tokens & auth](/core/tokens-and-auth) fo
 picture, and [Authoring portal.config.ts](/config-cli/portal-config) for verifying your
 own JWTs.
 
-> **Doc gap:** the exact contract for `/api/portal-token` above is intentionally left
-> generic. The material available to write these docs covers *verifying your own JWTs*
-> (`auth` in `portal.config.ts`) in detail, but doesn't document a public endpoint or
-> process for the alternative path — tokens "minted by Portal" — that
-> `@portalsdk/config` references as the default. If your project relies on
-> Portal-minted tokens rather than your own JWTs, that flow isn't covered here yet.
+Your `/api/portal-token` route has two ways to produce that token:
+
+- **Portal mints it** — `POST /v1/tokens` with your `sk_` and a body of
+  `{ userId, claims?, channels?, ttl? }`, which returns `{ token, expiresAt }`. See
+  [Mint an end-user Portal JWT](/api-reference). That route is server-only: it rejects
+  any request carrying an `Origin` header, so it can never be called from a browser.
+  `POST /v1/tokens/anonymous` is the equivalent for anonymous sessions and accepts a
+  `pk_`.
+- **You mint it** — issue your own JWT and let Portal verify it by setting
+  `auth.issuer`, `auth.jwksUrl` and `auth.claimMap` in
+  [`portal.config.ts`](/config-cli/portal-config).
 
 ## Next steps
 
