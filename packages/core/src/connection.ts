@@ -753,19 +753,21 @@ export class ChannelConnection {
     return promise;
   }
 
-  async #threadPage(query: ThreadsQuery | undefined, before: number | undefined): Promise<ThreadPage> {
+  async #threadPage(query: ThreadsQuery | undefined, cursor: string | undefined): Promise<ThreadPage> {
     const page = await this.#httpClient().threads(this.#deps.channelId, {
       ...(query?.root !== undefined ? { root: query.root } : { parent: query?.parent ?? "" }),
-      ...(before !== undefined ? { before } : {}),
+      ...(cursor !== undefined ? { cursor } : {}),
       ...(query?.limit !== undefined ? { limit: query.limit } : {}),
     });
-    const last = page.threads.at(-1);
+    const nextCursor = page.nextCursor;
     return {
       threads: page.threads.map(toThreadNode),
       hasMore: page.hasMore,
+      // Gated on the server's nextCursor, not hasMore: a page that says hasMore without a
+      // cursor to fetch it with is treated as exhausted rather than retried.
       next: () =>
-        page.hasMore && last !== undefined
-          ? this.#threadPage(query, last.spawnSeq)
+        nextCursor !== undefined
+          ? this.#threadPage(query, nextCursor)
           : Promise.resolve(exhaustedThreadPage()),
     };
   }

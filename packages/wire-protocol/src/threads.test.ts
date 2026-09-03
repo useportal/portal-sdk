@@ -181,6 +181,11 @@ describe("thread HTTP shapes", () => {
     } satisfies ThreadNodeWire;
     const child = { ...node, id: "m_reply", parentThreadId: "m_root", depth: 1 } satisfies ThreadNodeWire;
     const page = { threads: [node, child], hasMore: false } satisfies ThreadsResponse;
+    const pageWithMore = {
+      threads: [node],
+      hasMore: true,
+      nextCursor: "c_1",
+    } satisfies ThreadsResponse;
     const body = { content: { text: "hi" }, threadParentId: "m_root" } satisfies PublishBody;
     const rejected = {
       code: "validation_failed",
@@ -188,6 +193,7 @@ describe("thread HTTP shapes", () => {
     } satisfies PublishErrorBody;
 
     expect(page.threads.map((t) => t.depth)).toEqual([0, 1]);
+    expect(pageWithMore.nextCursor).toBe("c_1");
     expect(body.threadParentId).toBe("m_root");
     expect(rejected.reason).toBe("thread_depth_exceeded");
   });

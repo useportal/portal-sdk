@@ -83,14 +83,17 @@ export type ThreadNodeWire = {
 };
 
 /**
- * `GET /v1/channels/{channelId}/threads?parent={id|""}|root={id}&before=&limit=`.
+ * `GET /v1/channels/{channelId}/threads?parent={id|""}|root={id}&cursor=&limit=`.
  *
  * `parent=""` lists root threads; `parent={id}` lists the threads nested directly under
- * one; `root={id}` lists every thread descending from a root.
+ * one; `root={id}` lists every thread descending from a root. `cursor` is opaque — the
+ * client only ever echoes a `nextCursor` handed back on a prior page.
  */
 export type ThreadsResponse = {
   threads: ThreadNodeWire[];
   hasMore: boolean;
+  /** Present when another page follows; pass verbatim as `cursor` to fetch it. */
+  nextCursor?: string;
 };
 
 

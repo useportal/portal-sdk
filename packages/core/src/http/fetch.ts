@@ -38,7 +38,7 @@ function threadsUrl(httpUrl: string, channelId: string, query: ThreadsHttpQuery)
   const q = url.searchParams;
   if (query.root !== undefined) q.set("root", query.root);
   else q.set("parent", query.parent ?? "");
-  if (query.before !== undefined) q.set("before", String(query.before));
+  if (query.cursor !== undefined) q.set("cursor", query.cursor);
   if (query.limit !== undefined) q.set("limit", String(query.limit));
   return url.toString();
 }

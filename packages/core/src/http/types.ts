@@ -39,12 +39,13 @@ export interface HistoryQuery {
 
 /**
  * Thread registry query. Exactly one of `parent` (`""` for root threads) or `root` is sent;
- * `before` is the keyset cursor for the next page.
+ * `cursor` is the server's opaque cursor, echoed verbatim from a prior page's `nextCursor` —
+ * never derived from a thread node's own fields.
  */
 export interface ThreadsHttpQuery {
   parent?: string;
   root?: string;
-  before?: number;
+  cursor?: string;
   limit?: number;
 }
 

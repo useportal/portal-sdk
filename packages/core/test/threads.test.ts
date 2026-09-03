@@ -472,11 +472,11 @@ describe("threads registry", () => {
     ...over,
   });
 
-  it("lists root threads by default and pages with next()", async () => {
+  it("lists root threads by default and pages with the server's nextCursor", async () => {
     const http = new MockHttpClient({
       onThreads: (_c, q) =>
-        q.before === undefined
-          ? { threads: [node("m_20", 20), node("m_10", 10)], hasMore: true }
+        q.cursor === undefined
+          ? { threads: [node("m_20", 20), node("m_10", 10)], hasMore: true, nextCursor: "c_10" }
           : { threads: [node("m_5", 5)], hasMore: false },
     });
     const { channel } = setup((ctx) => ctx.ready(), http);
@@ -491,14 +491,66 @@ describe("threads registry", () => {
     expect(page.threads[0]).not.toHaveProperty("spawnSeq");
     expect(page.threads[0]).not.toHaveProperty("latestSeq");
 
+    // next() sends exactly the server's nextCursor, nothing derived from a node's own fields.
     const next = await page.next();
-    expect(http.threadCalls[1]?.query).toEqual({ parent: "", before: 10 });
+    expect(http.threadCalls[1]?.query).toEqual({ parent: "", cursor: "c_10" });
     expect(next.threads.map((t) => t.id)).toEqual(["m_5"]);
     expect(next.hasMore).toBe(false);
 
     const exhausted = await next.next();
     expect(exhausted).toMatchObject({ threads: [], hasMore: false });
     expect(http.threadCalls).toHaveLength(2);
+  });
+
+  it("three-page walk terminates on the server's nextCursor chain", async () => {
+    const http = new MockHttpClient({
+      onThreads: (_c, q) => {
+        if (q.cursor === undefined) return { threads: [node("m_30", 30)], hasMore: true, nextCursor: "c_a" };
+        if (q.cursor === "c_a") return { threads: [node("m_20", 20)], hasMore: true, nextCursor: "c_b" };
+        if (q.cursor === "c_b") return { threads: [node("m_10", 10)], hasMore: false };
+        throw new Error(`unexpected cursor ${q.cursor}`);
+      },
+    });
+    const { channel } = setup((ctx) => ctx.ready(), http);
+
+    const page1 = await channel.threads();
+    const page2 = await page1.next();
+    const page3 = await page2.next();
+    const page4 = await page3.next();
+
+    expect([page1, page2, page3].map((p) => p.threads.map((t) => t.id))).toEqual([
+      ["m_30"],
+      ["m_20"],
+      ["m_10"],
+    ]);
+    expect(page4).toMatchObject({ threads: [], hasMore: false });
+    expect(http.threadCalls).toHaveLength(3);
+  });
+
+  it("does not loop when hasMore is true but nextCursor is absent", async () => {
+    const http = new MockHttpClient({
+      onThreads: () => ({ threads: [node("m_1", 1)], hasMore: true }),
+    });
+    const { channel } = setup((ctx) => ctx.ready(), http);
+
+    const page = await channel.threads();
+    expect(page.hasMore).toBe(true);
+
+    const next = await page.next();
+    expect(next).toMatchObject({ threads: [], hasMore: false });
+    expect(http.threadCalls).toHaveLength(1); // next() made no request
+  });
+
+  it("surfaces invalid_cursor as the normal request error, not a retry", async () => {
+    const http = new MockHttpClient();
+    http.threads = (channelId, query) => {
+      http.threadCalls.push({ channelId, query });
+      return Promise.reject(new Error("threads request failed with status 400"));
+    };
+    const { channel } = setup((ctx) => ctx.ready(), http);
+
+    await expect(channel.threads({ parent: "m_1" })).rejects.toThrow(/400/);
+    expect(http.threadCalls).toHaveLength(1);
   });
 
   it("sends parent, root, and limit as given", async () => {
