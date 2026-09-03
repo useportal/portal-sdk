@@ -211,3 +211,98 @@ describe("useThread over the mock server", () => {
     await expect(result.current.loadPrevious()).resolves.toBe(false);
   });
 });
+
+describe("useThread: prop changes and error mapping", () => {
+  it("switching threadId moves to the other lens and releases the old one's callbacks", async () => {
+    const server = new MockSocketServer((ctx) => {
+      ctx.ready({ seq: 1 });
+      ctx.send({ t: "batch", msgs: [reply(2, "m_1", 1), reply(3, "m_2", 1)] });
+    });
+    installMocks(server);
+    const onMessage = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ threadId }: { threadId: string }) =>
+        useThread({ channelId: "room", threadId, history: "none", onMessage }),
+      { wrapper: wrapperFor(makePortal()), initialProps: { threadId: "m_1" } },
+    );
+    await waitFor(() => expect(result.current.messages.map((m) => m.id)).toEqual(["m_2"]));
+    expect(onMessage.mock.calls.map((c) => c[0]?.id)).toEqual(["m_2"]); // the mount delivery
+    onMessage.mockClear();
+
+    rerender({ threadId: "m_2" });
+    expect(result.current.messages.map((m) => m.id)).toEqual(["m_3"]);
+    // Still one socket: a thread switch is a lens switch, not a reconnect.
+    expect(server.sockets).toHaveLength(1);
+    expect(server.socket?.reconnectCount).toBe(0);
+
+    act(() => deliver(server, reply(4, "m_1", 2), reply(5, "m_2", 2)));
+    expect(onMessage.mock.calls.map((c) => c[0]?.id)).toEqual(["m_5"]);
+    expect(result.current.messages.map((m) => m.id)).toEqual(["m_3", "m_5"]);
+  });
+
+  it("switching channelId releases the old channel and acquires the new one", async () => {
+    const server = new MockSocketServer((ctx) => ctx.ready({ seq: 1 }));
+    installMocks(server);
+    const { result, rerender } = renderHook(
+      ({ channelId }: { channelId: string }) => useThread({ channelId, threadId: "m_1" }),
+      { wrapper: wrapperFor(makePortal()), initialProps: { channelId: "room-a" } },
+    );
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(server.urls[0]).toContain("room-a");
+
+    rerender({ channelId: "room-b" });
+    await waitFor(() => expect(server.sockets).toHaveLength(2));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(server.urls[1]).toContain("room-b");
+    // The old channel's release is deferred by core's grace period; it is not torn down yet
+    // (a fast switch back would reuse it), and the new one is live.
+    expect(server.sockets[1]?.closed).toBe(false);
+  });
+
+  it("maps in-session errors and terminal refusals to onError", async () => {
+    const server = new MockSocketServer((ctx) => ctx.refuse("invalid_api_key"));
+    installMocks(server);
+    const onError = vi.fn();
+    const { result } = renderHook(
+      () => useThread({ channelId: "room", threadId: "m_1", onError }),
+      { wrapper: wrapperFor(makePortal()) },
+    );
+    await waitFor(() => expect(result.current.status).toBe("blocked"));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]?.code).toBe("invalid_api_key");
+  });
+
+  it("rejects a where filter loudly, like useChannel", async () => {
+    const server = new MockSocketServer((ctx) => ctx.ready());
+    installMocks(server);
+    expect(() =>
+      renderHook(
+        () => useThread({ channelId: "room", threadId: "m_1", where: { retracted: { eq: false } } }),
+        { wrapper: wrapperFor(makePortal()) },
+      ),
+    ).toThrow(/reserved/);
+  });
+
+  it("fires onMention for this thread's mentions only", async () => {
+    const server = new MockSocketServer((ctx) =>
+      ctx.ready({ seq: 1, me: { id: "u_me", anon: false, claims: {}, capabilities: {} } }),
+    );
+    installMocks(server);
+    const onMention = vi.fn();
+    const { result } = renderHook(
+      () => useThread({ channelId: "room", threadId: "m_1", history: "none", onMention }),
+      { wrapper: wrapperFor(makePortal()) },
+    );
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+
+    act(() =>
+      deliver(
+        server,
+        { ...reply(2, "m_1", 1), mentions: [{ userId: "u_me" }] },
+        { ...reply(3, "m_9", 1), mentions: [{ userId: "u_me" }] },
+      ),
+    );
+    expect(onMention).toHaveBeenCalledTimes(1);
+    expect(onMention.mock.calls[0]?.[0]?.id).toBe("m_2");
+  });
+});
