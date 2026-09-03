@@ -400,9 +400,15 @@ export class ChannelConnection {
 
   send(input: SendInput<unknown>): Promise<SendAck> {
     // A thread reply is persistent by definition: the ephemeral lane has no thread field, so
-    // anything that would travel on it is refused outright rather than losing its thread.
+    // anything that would travel on it is refused outright rather than losing its thread —
+    // and an explicitly ephemeral send carrying a thread id is refused before routing, so no
+    // transport binding can turn that contradiction into a persistent reply.
     const threadParentId = (input as { threadParentId?: string }).threadParentId;
+    if (input.ephemeral === true && threadParentId !== undefined) {
+      return Promise.reject(threadOnEphemeralLane(input.type));
+    }
     const route = this.#extensionRoute(input.type);
+
     if (route !== undefined) {
       if (this.#degraded.has(route.namespace)) {
         return Promise.reject(
@@ -419,10 +425,10 @@ export class ChannelConnection {
       return this.#publishOnce(input);
     }
     if (input.ephemeral === true) {
-      if (threadParentId !== undefined) return Promise.reject(threadOnEphemeralLane(input.type));
       return this.#sendEphemeralFrame(input.type, input.content);
     }
     return this.#sendPersistent(input);
+
   }
 
 

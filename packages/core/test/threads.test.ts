@@ -381,13 +381,24 @@ describe("sending into a thread", () => {
     expect(ids(thread.messages)).toEqual(["e_1"]);
   });
 
-  it("rejects an ephemeral send addressed to a thread", async () => {
-
-    const { channel } = setup((ctx) => ctx.ready());
+  it("rejects an ephemeral send addressed to a thread, whatever its type is bound to", async () => {
+    const { channel, http, server } = setup((ctx) =>
+      ctx.ready({ bindings: { "ns2.": "http", "ns1.": "ws" } }),
+    );
     await vi.waitFor(() => expect(channel.status).toBe("ready"));
-    await expect(
-      channel.thread("m_1").send({ ephemeral: true, content: {} } as never),
-    ).rejects.toBeInstanceOf(NotYetSupportedError);
+    const framesBefore = server.socket?.sent.length;
+
+    for (const type of [undefined, "ns2.do", "ns1.move"]) {
+      await expect(
+        channel.thread("m_1").send({ ephemeral: true, type, content: {} } as never),
+      ).rejects.toBeInstanceOf(NotYetSupportedError);
+      await expect(
+        channel.send({ ephemeral: true, type, content: {}, threadParentId: "m_1" } as never),
+      ).rejects.toBeInstanceOf(NotYetSupportedError);
+    }
+    // Neither a persistent publish nor an ephemeral frame left the client.
+    expect(http.publishCalls).toHaveLength(0);
+    expect(server.socket?.sent.length).toBe(framesBefore);
   });
 });
 
