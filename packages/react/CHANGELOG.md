@@ -3,7 +3,30 @@
 All notable changes to this package are documented here. This package is versioned
 independently of the other `@portalsdk` packages.
 
+## 0.2.0
+
+### Added
+
+- **`useThread({ channelId, threadId, … })`** — one thread of a channel, as a selector over
+  core's `ThreadHandle`: `messages` (this thread's replies only), `send` (replies into the
+  thread), `loadPrevious` / `hasPrevious` / `isLoadingPrevious` (this thread's paging), and
+  the channel's `status`. Takes `useChannel`'s params plus `threadId`; `onMessage` /
+  `onMention` fire for the thread's replies only. Shares the channel's connection with every
+  other hook on that channel — it holds the refcount while mounted and never owns a socket —
+  and re-renders for its own thread's changes only.
+- `useInbox` entries carry `threadId` / `parentThreadId` / `rootThreadId`, and
+  `channels.get(channelId, threadId)` addresses a thread entry. No new hook.
+
+### Changed
+
+- `useChannel(...).messages` now includes replies (messages with `threadParentId`).
+
+### Requires
+
+- `@portalsdk/core` ^0.2.0.
+
 ## 0.1.2
+
 
 ### Changed
 

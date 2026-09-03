@@ -3,16 +3,21 @@
 
 export { PortalProvider } from "./provider.js";
 export { useChannel } from "./use-channel.js";
+export { useThread } from "./use-thread.js";
 export { useInbox } from "./use-inbox.js";
+
 
 // `Me` and `PortalProviderProps` stay internal aliases — present in the emitted types as
 // local declarations, never on the export list.
 export type {
   UseChannelParams,
   UseChannelResult,
+  UseThreadParams,
+  UseThreadResult,
   UseInboxParams,
   UseInboxResult,
 } from "./types.js";
+
 
 // Presence shapes, re-exported so consumers get them from the react entry point without also
 // importing @portalsdk/core.

@@ -113,7 +113,46 @@ describe("useInbox over the mock server", () => {
     expect(result.current.items.every((i) => i.read)).toBe(true);
   });
 
+  it("carries thread entries as siblings with their pointers", async () => {
+    const server = new MockSocketServer((ctx) =>
+      ctx.inboxReady({
+        entries: [
+          { id: "c1", unread: 1, muted: false, at: 1 },
+          { id: "c1", threadId: "m_1", rootThreadId: "m_1", unread: 2, muted: false, at: 2 },
+          {
+            id: "c1",
+            threadId: "m_2",
+            parentThreadId: "m_1",
+            rootThreadId: "m_1",
+            unread: 3,
+            muted: false,
+            at: 3,
+          },
+        ],
+        counter: 6,
+      }),
+    );
+    installMocks(server);
+    const { result } = renderHook(() => useInbox(), { wrapper: wrapperFor(makePortal()) });
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+
+    expect(result.current.channels).toHaveLength(3);
+    expect(result.current.channels.get("c1")?.unread).toBe(1);
+    expect(result.current.channels.get("c1", "m_1")).toMatchObject({ rootThreadId: "m_1", unread: 2 });
+    expect(result.current.channels.get("c1", "m_2")).toMatchObject({
+      parentThreadId: "m_1",
+      rootThreadId: "m_1",
+      unread: 3,
+    });
+
+    act(() => result.current.channels.get("c1", "m_2")?.markAsRead());
+    expect(result.current.channels.get("c1", "m_2")?.unread).toBe(0);
+    expect(result.current.channels.get("c1", "m_1")?.unread).toBe(2);
+    expect(result.current.channels.get("c1")?.unread).toBe(1);
+  });
+
   it("keeps counter global while unseen scopes to the view filter", async () => {
+
     const server = new MockSocketServer(seeded);
     installMocks(server);
     const { result } = renderHook(() => useInbox({ channelId: "c1" }), {
