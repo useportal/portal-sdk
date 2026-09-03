@@ -144,6 +144,9 @@ export class ChannelConnection {
   #socket: Socket | undefined;
   #http: HttpClient | undefined;
   #disposed = false;
+  /** Bumped on every `connect()`; a request that started in an earlier session lands nowhere. */
+  #session = 0;
+
 
   /** Sticky reconnect hint from the last `ready`; echoed on the next upgrade. */
   #leaf: string | undefined;
@@ -185,8 +188,10 @@ export class ChannelConnection {
   connect(): void {
     if (this.#socket !== undefined) return;
     this.#disposed = false;
+    this.#session++;
     this.#tokenRetryUsed = false;
     this.#setStatus("connecting");
+
     this.#socket = getSocketFactory()({ url: this.#buildUrl, onEvent: this.#onEvent });
     if (this.#deps.history !== "none") this.#backfill(this.#deps.history);
     // A thread lens that stayed subscribed across a teardown starts its session over, exactly
@@ -351,6 +356,13 @@ export class ChannelConnection {
 
   #deliver(msgs: readonly WireMessage[]): void {
     const { delivered, gaps } = this.#buffer.ingest(msgs);
+    this.#announce(delivered);
+    this.#publishState();
+    this.#scheduleGapFills(gaps);
+  }
+
+  /** Fire `message` (and `mention`, when addressed to me) for newly arrived messages. */
+  #announce(delivered: readonly Message[]): void {
     const meId = this.store.getSnapshot().me?.id;
     for (const msg of delivered) {
       this.events.emit("message", msg);
@@ -358,9 +370,8 @@ export class ChannelConnection {
         this.events.emit("mention", msg);
       }
     }
-    this.#publishState();
-    this.#scheduleGapFills(gaps);
   }
+
 
   #onRetract(id: string, seq: number): void {
     this.#buffer.retract(seq);
@@ -605,10 +616,17 @@ export class ChannelConnection {
    * triggers the thread's initial page. The count is what a reconnect consults.
    */
   subscribeThread(threadId: string, listener: () => void): Unsubscribe {
+    return this.#holdThread(threadId, this.store.subscribe(listener));
+  }
+
+  /**
+   * Count a lens listener (store subscription or event listener alike) as holding the
+   * thread, so a reconnect after a teardown re-fetches it, and release it exactly once.
+   */
+  #holdThread(threadId: string, off: Unsubscribe): Unsubscribe {
     const state = this.#thread(threadId);
     state.subscribers++;
     this.#ensureThreadLoaded(threadId);
-    const off = this.store.subscribe(listener);
     let released = false;
     return () => {
       if (released) return;
@@ -618,14 +636,25 @@ export class ChannelConnection {
     };
   }
 
-  /** Thread-scoped events: `message`/`mention`/`retract` narrowed; the rest are the channel's. */
+  /**
+   * Thread-scoped events: `message`/`mention`/`retract` narrowed; the rest are the channel's.
+   * An event listener holds the thread exactly as a store subscription does.
+   */
   onThread<E extends keyof ChannelEvents<unknown>>(
     threadId: string,
     event: E,
     fn: ChannelEvents<unknown>[E],
   ): Unsubscribe {
-    this.#ensureThreadLoaded(threadId);
+    return this.#holdThread(threadId, this.#onThreadEvent(threadId, event, fn));
+  }
+
+  #onThreadEvent<E extends keyof ChannelEvents<unknown>>(
+    threadId: string,
+    event: E,
+    fn: ChannelEvents<unknown>[E],
+  ): Unsubscribe {
     switch (event) {
+
       case "message": {
         const handler = fn as ChannelEvents<unknown>["message"];
         return this.events.on("message", (msg: Message) => {
@@ -690,27 +719,35 @@ export class ChannelConnection {
     if (explicit) state.loading = true;
     const pageSize = this.#deps.history === "none" ? 50 : this.#deps.history;
     const before = this.#buffer.lowestThreadSeq(threadId);
+    const session = this.#session;
+    // Still the live request for this session — a teardown or a reconnect in the meantime
+    // hands the thread to a new request, and this one must then touch nothing.
+    const current = (): boolean =>
+      !this.#disposed && session === this.#session && state.inFlight === promise;
 
-    const promise = (async (): Promise<boolean> => {
+    const promise: Promise<boolean> = (async (): Promise<boolean> => {
       try {
         const page = await this.#httpClient().history(this.#deps.channelId, {
           threadParentId: threadId,
           ...(before !== undefined ? { before } : {}),
           limit: pageSize,
         });
-        if (this.#disposed) return false;
-        this.#buffer.ingestThreadHistory(page.msgs);
+        if (!current()) return false;
+        this.#announce(this.#buffer.ingestThreadHistory(page.msgs));
         this.#buffer.setThreadHasPrevious(threadId, page.hasMore);
         return page.hasMore;
       } catch (cause) {
-        state.loaded = false;
+        if (current()) state.loaded = false;
         throw cause;
       } finally {
-        state.loading = false;
-        state.inFlight = undefined;
-        if (!this.#disposed) this.#publishState();
+        if (current()) {
+          state.loading = false;
+          state.inFlight = undefined;
+          this.#publishState();
+        }
       }
     })();
+
     state.inFlight = promise;
     if (explicit) this.#publishState();
     return promise;

@@ -138,14 +138,29 @@ export class MessageBuffer {
     this.#threadHasPrevious.set(threadId, value);
   }
 
-  /** Ingest a page of one thread's history. Never lowers the channel's own view. */
-  ingestThreadHistory(msgs: readonly WireMessage[]): void {
+  /**
+   * Ingest a page of one thread's history. Never lowers the channel's own view.
+   *
+   * Returns the newly stored replies that lie above the contiguous live position: those are
+   * replies the live stream has not delivered yet but will (or is filling a gap for), and
+   * the page has now beaten it to them. They are announced once here; the live copy that
+   * follows is a dedup and stays silent. Replies at or below the position are history and
+   * are never announced, exactly like a channel page.
+   */
+  ingestThreadHistory(msgs: readonly WireMessage[]): Message[] {
+    const live: Message[] = [];
+    const contiguous = this.#contiguous;
     for (const msg of msgs) {
       if (msg.seq === null) continue;
-      this.#store(msg, false);
+      const stored = this.#store(msg, false);
+      if (stored !== undefined && contiguous !== undefined && msg.seq > contiguous) {
+        live.push(this.#toPublic(stored));
+      }
     }
     this.#advanceContiguous();
+    return live;
   }
+
 
   /** The thread a held message belongs to, if it is a reply. */
   threadOf(messageId: string): string | undefined {

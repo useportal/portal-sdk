@@ -11,8 +11,17 @@ independently of the other `@portalsdk` packages.
   `ephemeral: true` send carrying `threadParentId`) now rejects with `NotYetSupportedError`
   instead of leaving as an ephemeral frame without its thread. Types bound to an extension's
   HTTP transport publish the reply with `threadParentId`, as before.
+- A thread page that reaches a reply before the live stream does now fires `message` /
+  `mention` for it once (the live copy is a silent dedup); previously the event was lost.
+- A thread page still in flight across a channel teardown and reconnect is discarded instead
+  of landing in the new session and clearing its in-flight request.
+- A thread `on()` listener holds the thread like a `subscribe()` does: the thread is
+  re-fetched after a teardown and reacquire while any listener remains.
+- Inbox entry identity is encoded uniformly, so a channel id can never collide with a
+  thread entry's key.
 
 ## 0.2.0
+
 
 
 ### Added

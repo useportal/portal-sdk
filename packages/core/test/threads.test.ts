@@ -793,3 +793,107 @@ describe("threads registry query precedence", () => {
     expect(http.threadCalls[0]?.query).toEqual({ root: "m_1" });
   });
 });
+
+describe("a thread page that beats the live stream", () => {
+  it("announces replies above the live position once, and the later live copy stays silent", async () => {
+    const messages: string[] = [];
+    const mentions: string[] = [];
+    const http = new MockHttpClient({
+      onHistory: () => ({
+        // seq 3 is history (at or below the ready head of 5); seq 6 is live-region and not
+        // delivered yet.
+        msgs: [reply(3, "m_1", 1), reply(6, "m_1", 2, { mentions: [{ userId: "u_me" }] })],
+        hasMore: false,
+      }),
+    });
+    const { channel, server } = setup(
+      (ctx) => ctx.ready({ seq: 5, me: { id: "u_me", anon: false, claims: {}, capabilities: {} } }),
+      http,
+      { history: "none" },
+    );
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    const thread = channel.thread("m_1");
+    thread.on("message", (m) => messages.push(m.id));
+    thread.on("mention", (m) => mentions.push(m.id));
+    channel.on("message", (m) => messages.push(`ch:${m.id}`));
+    await vi.waitFor(() => expect(thread.messages).toHaveLength(2));
+
+    expect(messages).toEqual(["m_6", "ch:m_6"]);
+    expect(mentions).toEqual(["m_6"]);
+
+    // The live stream now delivers 6 (a dedup) and 7 (new).
+    server.socket?.emit({
+      type: "message",
+      data: serializeFrame({ t: "batch", msgs: [reply(6, "m_1", 2), reply(7, "m_1", 3)] }),
+    });
+    expect(messages).toEqual(["m_6", "ch:m_6", "m_7", "ch:m_7"]);
+    expect(ids(thread.messages)).toEqual(["m_3", "m_6", "m_7"]);
+  });
+});
+
+describe("a thread page in flight across a reconnect", () => {
+  it("lands nowhere, and leaves the new session's request in charge", async () => {
+    vi.useFakeTimers();
+    const pending: ((page: { msgs: WireMessage[]; hasMore: boolean }) => void)[] = [];
+    const http = new MockHttpClient();
+    http.history = (channelId, query) => {
+      http.historyCalls.push({ channelId, query });
+      return new Promise((resolve) => pending.push(resolve));
+    };
+    const { channel } = setup((ctx) => ctx.ready({ seq: 10 }), http, { history: "none" });
+    await vi.advanceTimersByTimeAsync(0);
+    const thread = channel.thread("m_1");
+    thread.subscribe(() => {});
+    expect(pending).toHaveLength(1); // request A, first session
+
+    channel.release();
+    await vi.advanceTimersByTimeAsync(GRACE_MS + 1);
+    channel.acquire();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pending).toHaveLength(2); // request B, second session
+
+    // B is the in-flight request now: an explicit loadPrevious joins it, no third request.
+    const joined = thread.loadPrevious();
+    expect(pending).toHaveLength(2);
+    expect(thread.isLoadingPrevious).toBe(true);
+
+    // A resolves late with a stale page: ignored entirely, B still owns the slot.
+    pending[0]?.({ msgs: [reply(9, "m_1", 9)], hasMore: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(thread.messages).toHaveLength(0);
+    expect(thread.hasPrevious).toBe(true);
+    expect(thread.isLoadingPrevious).toBe(true);
+    expect(thread.loadPrevious()).toBe(joined);
+
+    pending[1]?.({ msgs: [reply(8, "m_1", 1)], hasMore: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await joined).toBe(true);
+    expect(ids(thread.messages)).toEqual(["m_8"]);
+    expect(thread.isLoadingPrevious).toBe(false);
+    expect(http.historyCalls).toHaveLength(2);
+  });
+});
+
+describe("an event-only listener holds the thread", () => {
+  it("is re-fetched after a teardown and reacquire, until released", async () => {
+    vi.useFakeTimers();
+    const { channel, http } = setup((ctx) => ctx.ready(), undefined, { history: "none" });
+    await vi.advanceTimersByTimeAsync(0);
+    const off = channel.thread("m_1").on("message", () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.historyCalls).toHaveLength(1);
+
+    channel.release();
+    await vi.advanceTimersByTimeAsync(GRACE_MS + 1);
+    channel.acquire();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.historyCalls).toHaveLength(2);
+
+    off();
+    channel.release();
+    await vi.advanceTimersByTimeAsync(GRACE_MS + 1);
+    channel.acquire();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.historyCalls).toHaveLength(2);
+  });
+});

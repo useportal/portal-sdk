@@ -147,3 +147,26 @@ describe("thread entries are siblings of the channel entry", () => {
     expect(view.channels.get("c1", "m_1")?.threadId).toBe("m_1");
   });
 });
+
+describe("entry identity", () => {
+  it("never confuses a channel whose id looks like a thread key with a thread entry", async () => {
+    const lookalike = JSON.stringify(["c1", "m_1"]);
+    const { inbox } = setup((ctx) =>
+      ctx.inboxReady({
+        entries: [
+          { id: lookalike, unread: 7, muted: false, at: 1 },
+          { id: "c1", threadId: "m_1", rootThreadId: "m_1", unread: 2, muted: false, at: 2 },
+          { id: "c1", unread: 1, muted: false, at: 3 },
+        ],
+        counter: 10,
+      }),
+    );
+    await vi.waitFor(() => expect(inbox.status).toBe("ready"));
+
+    expect(inbox.channels).toHaveLength(3);
+    expect(inbox.channels.get(lookalike)).toMatchObject({ id: lookalike, unread: 7 });
+    expect(inbox.channels.get(lookalike)).not.toHaveProperty("threadId");
+    expect(inbox.channels.get("c1", "m_1")).toMatchObject({ threadId: "m_1", unread: 2 });
+    expect(inbox.channels.get("c1")).toMatchObject({ unread: 1 });
+  });
+});

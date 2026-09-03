@@ -32,9 +32,13 @@ import type {
 } from "../types.js";
 import { buildInboxUpgradeUrl } from "../url.js";
 
-/** Registry key for an entry: a channel entry by its id, a thread entry by `(id, threadId)`. */
+/**
+ * Registry key for an entry — `(id, threadId)`, with the channel entry as `(id, null)`. Both
+ * shapes go through the same encoding, so no channel id can collide with a thread key.
+ */
 export const entryKey = (channelId: string, threadId: string | undefined): string =>
-  threadId === undefined ? channelId : JSON.stringify([channelId, threadId]);
+  JSON.stringify([channelId, threadId ?? null]);
+
 
 /** Build an {@link InboxEntries} — an array whose `.get` always hits the full registry. */
 export function makeInboxEntries(
