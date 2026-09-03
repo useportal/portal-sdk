@@ -3,6 +3,7 @@ import type { ResolvedHosts } from "./config.js";
 import type { Credentials } from "./credentials.js";
 import { devWarn } from "./env.js";
 import { NotYetSupportedError } from "./errors.js";
+import { ThreadHandleImpl } from "./thread.js";
 import type {
   ChannelEvents,
   ChannelHandle,
@@ -16,8 +17,12 @@ import type {
   MessageWhere,
   SendAck,
   SendInput,
+  ThreadHandle,
+  ThreadPage,
+  ThreadsQuery,
   Unsubscribe,
 } from "./types.js";
+
 
 /** Grace window between the last `release()` and teardown (~seconds). */
 export const GRACE_MS = 3_000;
@@ -57,7 +62,10 @@ const leakRegistry =
 export class ChannelHandleImpl implements ChannelHandle<unknown> {
   readonly #connection: ChannelConnection;
   readonly #leak: LeakCell;
+  /** One lens per thread id, so a lens is a stable identity for the life of the handle. */
+  readonly #threads = new Map<string, ThreadHandleImpl>();
   #count = 0;
+
   #active = false;
   #graceTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -182,6 +190,22 @@ export class ChannelHandleImpl implements ChannelHandle<unknown> {
       "Filtering a channel with where() is reserved and not supported in v1.",
     );
   }
+
+  // ── Threads ───────────────────────────────────────────────
+
+  thread(threadId: string): ThreadHandle<unknown> {
+    let lens = this.#threads.get(threadId);
+    if (lens === undefined) {
+      lens = new ThreadHandleImpl(this.#connection, threadId);
+      this.#threads.set(threadId, lens);
+    }
+    return lens;
+  }
+
+  threads(query?: ThreadsQuery): Promise<ThreadPage> {
+    return this.#connection.threads(query);
+  }
+
 
   // ── Write plane ───────────────────────────────────────────
 

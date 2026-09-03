@@ -3,7 +3,42 @@
 All notable changes to this package are documented here. This package is versioned
 independently of the other `@portalsdk` packages.
 
+## 0.2.0
+
+### Added
+
+- **Threads.** `Message.threadParentId?` marks a reply with the id of the message it answers
+  — which is also its thread id; the parent may itself be a reply. Replies are part of the
+  channel's `messages`.
+- **`send({ threadParentId })`** replies into a thread; the first reply to a message creates
+  it. Nesting deeper than the platform allows rejects with a `BlockedError` whose `reason` is
+  `"thread_depth_exceeded"`.
+- **`channel.thread(threadId)`** — a `ThreadHandle`: a lens over the same store narrowed to
+  one thread (`messages`, `send`, `loadPrevious`/`hasPrevious`/`isLoadingPrevious`, `on`,
+  `subscribe`/`getSnapshot`). One socket, N threads. The first subscription fetches the
+  thread's latest history page; live replies arrive through the channel. `loadPrevious` pages
+  that thread alone, at the channel's `history` page size, and resolves `false` at the thread's
+  first reply. Own replies echo through optimistic insert + ack, never the wire.
+- **`channel.threads(query?)`** — the session's thread registry (`ThreadPage` of `ThreadNode`,
+  with keyset `next()`): root threads by default, `{ parent }` for the threads directly under
+  one, `{ root }` for a whole tree.
+- **Inbox thread entries.** `InboxEntry` gains `threadId?`, `parentThreadId?`,
+  `rootThreadId?`. Thread entries are siblings of the channel entry with their own
+  `latest`/`unread`/`muted`/read position; `markAsRead()`/`mute()` act on that entry only.
+  `channels.get(channelId, threadId?)` addresses one by `(id, threadId)`. The SDK selects and
+  aggregates nothing across entries.
+
+### Changed
+
+- `InboxEntries.get` takes an optional second `threadId` argument. Without it the behavior is
+  unchanged: the channel's own entry.
+
+### Requires
+
+- `@portalsdk/wire-protocol` ^0.4.0.
+
 ## 0.1.4
+
 
 ### Changed
 

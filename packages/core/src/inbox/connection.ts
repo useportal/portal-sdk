@@ -32,15 +32,20 @@ import type {
 } from "../types.js";
 import { buildInboxUpgradeUrl } from "../url.js";
 
+/** Registry key for an entry: a channel entry by its id, a thread entry by `(id, threadId)`. */
+export const entryKey = (channelId: string, threadId: string | undefined): string =>
+  threadId === undefined ? channelId : JSON.stringify([channelId, threadId]);
+
 /** Build an {@link InboxEntries} — an array whose `.get` always hits the full registry. */
 export function makeInboxEntries(
   list: InboxEntry[],
-  get: (id: string) => InboxEntry | undefined,
+  get: (channelId: string, threadId?: string) => InboxEntry | undefined,
 ): InboxEntries {
-  const entries = list as InboxEntry[] & { get(id: string): InboxEntry | undefined };
+  const entries = list as InboxEntry[] & InboxEntries;
   entries.get = get;
   return entries as InboxEntries;
 }
+
 
 const emptyInbox = (status: InboxStatus): InboxSnapshot => ({
   channels: makeInboxEntries([], () => undefined),
@@ -157,7 +162,10 @@ export class InboxConnection {
     if (isInboxReady(frame)) {
       this.#entries.clear();
       this.#items.clear();
-      for (const entry of frame.entries) this.#entries.set(entry.id, entry);
+      for (const entry of frame.entries) {
+        this.#entries.set(entryKey(entry.id, entry.threadId), entry);
+      }
+
       for (const item of frame.items) this.#items.set(item.id, item);
       this.#counter = frame.counter;
       // A healthy session regains its one token-refresh retry, so a later expiry is not fatal.
@@ -166,10 +174,12 @@ export class InboxConnection {
       return;
     }
     if (isInboxEntry(frame)) {
-      this.#entries.set(frame.entry.id, frame.entry);
+      // A thread entry upserts its own row only; the channel row is a distinct sibling.
+      this.#entries.set(entryKey(frame.entry.id, frame.entry.threadId), frame.entry);
       this.#publishState();
       return;
     }
+
     if (isInboxItem(frame)) {
       // The item id is the idempotency key; a redelivered id updates state but is not a new
       // arrival, so the `item` event fires only the first time an id is seen.
@@ -231,14 +241,20 @@ export class InboxConnection {
 
   // ── Read + mute actions (two read models) ─────────────────
 
-  /** Advance the inbox position for one channel — clears its badge (§5). */
-  markEntryRead(channelId: string): void {
-    const entry = this.#entries.get(channelId);
-    if (entry !== undefined) this.#entries.set(channelId, { ...entry, unread: 0 });
-    const frame: InboxReadFrame = { t: "read", channelId };
+  /** Advance the inbox position for one entry (a channel, or one of its threads) — clears its badge (§5). */
+  markEntryRead(channelId: string, threadId?: string): void {
+    const key = entryKey(channelId, threadId);
+    const entry = this.#entries.get(key);
+    if (entry !== undefined) this.#entries.set(key, { ...entry, unread: 0 });
+    const frame: InboxReadFrame = {
+      t: "read",
+      channelId,
+      ...(threadId !== undefined ? { threadId } : {}),
+    };
     this.#socket?.send(serializeFrame(frame));
     this.#publishState();
   }
+
 
   /** Flip one item's read flag (§5) — never cascades. */
   markItemRead(id: string): void {
@@ -257,14 +273,22 @@ export class InboxConnection {
     this.#publishState();
   }
 
-  /** Set the durable per-channel mute preference (§5). */
-  setMute(channelId: string, muted: boolean): void {
-    const entry = this.#entries.get(channelId);
-    if (entry !== undefined) this.#entries.set(channelId, { ...entry, muted });
-    const frame: InboxMuteFrame = { t: "mute", channelId, muted };
+  /** Set the mute preference for one entry (a channel, or one of its threads) (§5). */
+
+  setMute(channelId: string, muted: boolean, threadId?: string): void {
+    const key = entryKey(channelId, threadId);
+    const entry = this.#entries.get(key);
+    if (entry !== undefined) this.#entries.set(key, { ...entry, muted });
+    const frame: InboxMuteFrame = {
+      t: "mute",
+      channelId,
+      muted,
+      ...(threadId !== undefined ? { threadId } : {}),
+    };
     this.#socket?.send(serializeFrame(frame));
     this.#publishState();
   }
+
 
   // ── Snapshot ──────────────────────────────────────────────
 
@@ -272,11 +296,16 @@ export class InboxConnection {
     const publicEntries = [...this.#entries.values()]
       .sort(byRecencyDesc)
       .map((wire) => this.#toEntry(wire));
-    const registry = new Map(publicEntries.map((entry) => [entry.id, entry]));
+    const registry = new Map(
+      publicEntries.map((entry) => [entryKey(entry.id, entry.threadId), entry]),
+    );
     const items = [...this.#items.values()].sort(byRecencyDesc).map((w) => this.#toItem(w));
 
     this.store.set({
-      channels: makeInboxEntries(publicEntries, (id) => registry.get(id)),
+      channels: makeInboxEntries(publicEntries, (id, threadId) =>
+        registry.get(entryKey(id, threadId)),
+      ),
+
       items,
       counter: this.#counter,
       status: status ?? this.store.getSnapshot().status,
@@ -287,17 +316,21 @@ export class InboxConnection {
   #toEntry(wire: InboxEntryWire): InboxEntry {
     return {
       id: wire.id,
+      ...(wire.threadId !== undefined ? { threadId: wire.threadId } : {}),
+      ...(wire.parentThreadId !== undefined ? { parentThreadId: wire.parentThreadId } : {}),
+      ...(wire.rootThreadId !== undefined ? { rootThreadId: wire.rootThreadId } : {}),
       ...(wire.name !== undefined ? { name: wire.name } : {}),
       ...(wire.meta !== undefined ? { meta: wire.meta } : {}),
       ...(wire.latest !== undefined ? { latest: wire.latest } : {}),
       unread: wire.unread,
       muted: wire.muted,
       at: wire.at,
-      markAsRead: () => this.markEntryRead(wire.id),
-      mute: () => this.setMute(wire.id, true),
-      unmute: () => this.setMute(wire.id, false),
+      markAsRead: () => this.markEntryRead(wire.id, wire.threadId),
+      mute: () => this.setMute(wire.id, true, wire.threadId),
+      unmute: () => this.setMute(wire.id, false, wire.threadId),
     };
   }
+
 
   #toItem(wire: InboxItemWire): InboxItem {
     return {

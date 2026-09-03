@@ -3,7 +3,9 @@ import type {
   MembersResponse,
   PublishBody,
   SendAckWire,
+  ThreadsResponse,
 } from "@portalsdk/wire-protocol";
+
 
 import { resolveToken } from "../token.js";
 import type {
@@ -13,7 +15,9 @@ import type {
   HistoryQuery,
   MintOutcome,
   PublishOutcome,
+  ThreadsHttpQuery,
 } from "./types.js";
+
 
 /** HTTP key header carrying the publishable `apiKey` (§3, credential transport). */
 const API_KEY_HEADER = "x-portal-key";
@@ -25,8 +29,20 @@ function historyUrl(httpUrl: string, channelId: string, query: HistoryQuery): st
   if (query.limit !== undefined) q.set("limit", String(query.limit));
   if (query.from !== undefined) q.set("from", String(query.from));
   if (query.to !== undefined) q.set("to", String(query.to));
+  if (query.threadParentId !== undefined) q.set("threadParentId", query.threadParentId);
   return url.toString();
 }
+
+function threadsUrl(httpUrl: string, channelId: string, query: ThreadsHttpQuery): string {
+  const url = new URL(`${httpUrl}/v1/channels/${encodeURIComponent(channelId)}/threads`);
+  const q = url.searchParams;
+  if (query.root !== undefined) q.set("root", query.root);
+  else q.set("parent", query.parent ?? "");
+  if (query.before !== undefined) q.set("before", String(query.before));
+  if (query.limit !== undefined) q.set("limit", String(query.limit));
+  return url.toString();
+}
+
 
 /** Production {@link HttpClient}, backed by `fetch`. Credentials are resolved per request. */
 export const createFetchHttpClient: HttpClientFactory = (
@@ -88,6 +104,18 @@ export const createFetchHttpClient: HttpClientFactory = (
       }
       return (await response.json()) as MembersResponse;
     },
+
+    async threads(channelId: string, query: ThreadsHttpQuery): Promise<ThreadsResponse> {
+      const response = await fetch(threadsUrl(deps.httpUrl, channelId, query), {
+        method: "GET",
+        headers: await authHeaders(),
+      });
+      if (!response.ok) {
+        throw new Error(`threads request failed with status ${response.status}`);
+      }
+      return (await response.json()) as ThreadsResponse;
+    },
+
 
     async mintAnonymousToken(anonId?: string): Promise<MintOutcome> {
       // Authenticated by the publishable key only — there is no bearer token yet.

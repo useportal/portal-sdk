@@ -3,7 +3,9 @@ import type {
   MembersResponse,
   PublishBody,
   SendAckWire,
+  ThreadsResponse,
 } from "@portalsdk/wire-protocol";
+
 
 /**
  * The HTTP seam.
@@ -23,13 +25,29 @@ export type MintOutcome =
   | { ok: true; token: string }
   | { ok: false; code: string; reason?: string };
 
-/** History query — scroll-up paging (`before`/`limit`) or a gap-fill range (`from`/`to`). */
+/**
+ * History query — scroll-up paging (`before`/`limit`), a gap-fill range (`from`/`to`), or
+ * thread paging (`threadParentId` + `before`/`limit`, where `before` is a thread position).
+ */
 export interface HistoryQuery {
   before?: number;
   limit?: number;
   from?: number;
   to?: number;
+  threadParentId?: string;
 }
+
+/**
+ * Thread registry query. Exactly one of `parent` (`""` for root threads) or `root` is sent;
+ * `before` is the keyset cursor for the next page.
+ */
+export interface ThreadsHttpQuery {
+  parent?: string;
+  root?: string;
+  before?: number;
+  limit?: number;
+}
+
 
 export interface HttpClient {
   /** `POST /v1/channels/{id}/messages` (§3.1). Network errors reject; 4xx resolve `ok:false`. */
@@ -38,6 +56,9 @@ export interface HttpClient {
   history(channelId: string, query: HistoryQuery): Promise<HistoryResponse>;
   /** `GET /v1/channels/{id}/members` (§3.3), one page per cursor. */
   members(channelId: string, cursor?: string): Promise<MembersResponse>;
+  /** `GET /v1/channels/{id}/threads`, one page per call. */
+  threads(channelId: string, query: ThreadsHttpQuery): Promise<ThreadsResponse>;
+
   /**
    * `POST /v1/tokens/anonymous`. Mints an anonymous session token, authenticated by the
    * publishable `apiKey` alone (no bearer). Passing `anonId` re-mints for the same identity.

@@ -2,7 +2,9 @@ import type {
   HistoryResponse,
   MembersResponse,
   PublishBody,
+  ThreadsResponse,
 } from "@portalsdk/wire-protocol";
+
 
 import type {
   HttpClient,
@@ -10,7 +12,9 @@ import type {
   HistoryQuery,
   MintOutcome,
   PublishOutcome,
+  ThreadsHttpQuery,
 } from "../../src/http/types.js";
+
 
 /** Base64url-encode a JSON value (no padding), for building fake JWTs. */
 function base64url(value: unknown): string {
@@ -26,8 +30,10 @@ export interface MockHttpOptions {
   onPublish?: (channelId: string, body: PublishBody) => PublishOutcome;
   onHistory?: (channelId: string, query: HistoryQuery) => HistoryResponse;
   onMembers?: (channelId: string, cursor: string | undefined) => MembersResponse;
+  onThreads?: (channelId: string, query: ThreadsHttpQuery) => ThreadsResponse;
   onMint?: (anonId: string | undefined) => MintOutcome;
 }
+
 
 /**
  * In-memory {@link HttpClient} for the message plane. It records every call and answers
@@ -39,7 +45,9 @@ export class MockHttpClient implements HttpClient {
   readonly publishCalls: { channelId: string; body: PublishBody }[] = [];
   readonly historyCalls: { channelId: string; query: HistoryQuery }[] = [];
   readonly memberCalls: { channelId: string; cursor: string | undefined }[] = [];
+  readonly threadCalls: { channelId: string; query: ThreadsHttpQuery }[] = [];
   readonly mintCalls: { anonId: string | undefined }[] = [];
+
 
   readonly #options: MockHttpOptions;
 
@@ -69,6 +77,13 @@ export class MockHttpClient implements HttpClient {
     const page = this.#options.onMembers?.(channelId, cursor) ?? { members: [] };
     return Promise.resolve(page);
   }
+
+  threads(channelId: string, query: ThreadsHttpQuery): Promise<ThreadsResponse> {
+    this.threadCalls.push({ channelId, query });
+    const page = this.#options.onThreads?.(channelId, query) ?? { threads: [], hasMore: false };
+    return Promise.resolve(page);
+  }
+
 
   mintAnonymousToken(anonId?: string): Promise<MintOutcome> {
     this.mintCalls.push({ anonId });
