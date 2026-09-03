@@ -54,4 +54,20 @@ export type WireMessage = {
   retracted: boolean;
   /** Ephemeral messages are not persisted and have `seq: null`. */
   ephemeral: boolean;
+  /**
+   * Present on a reply: the id of the message it replies to, which is also the id of the
+   * thread it belongs to. The parent may itself be a reply (nested threads). A thread comes
+   * into existence with its first reply — there is no separate create step.
+   *
+   * Replies travel in the channel's ordinary `batch` frames to every channel connection;
+   * grouping them into threads is the client's job.
+   */
+  threadParentId?: string;
+  /**
+   * Dense per-thread position, present alongside `threadParentId`. Like `seq` this is
+   * transport: `GET /history?threadParentId=` pages a thread by it, and it is stripped a
+   * layer up.
+   */
+  threadSeq?: number;
 };
+

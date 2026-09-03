@@ -3,7 +3,28 @@
 All notable changes to this package are documented here. This package is versioned
 independently of the other `@portalsdk` packages.
 
+## 0.4.0
+
+### Added
+
+- **Threads.** `WireMessage` gains `threadParentId?` (the id of the message a reply answers,
+  which is also its thread id; the parent may itself be a reply) and `threadSeq?` (dense
+  per-thread position). Replies travel in ordinary `batch`/`direct` frames.
+- `PublishBody.threadParentId?` — reply into a thread; the first reply creates it.
+- `validation_failed` in `PublishErrorCode`, with `ValidationFailedReason`
+  (`"thread_depth_exceeded"`) as its `reason`. `PublishErrorBody` is now discriminated on
+  `code` so that reason is typed.
+- `ThreadNodeWire` and `ThreadsResponse` — the shapes behind
+  `GET /v1/channels/{id}/threads?parent=|root=&before=&limit=`.
+- `InboxEntryWire` gains `threadId?`, `parentThreadId?`, `rootThreadId?`. A thread row is a
+  sibling of its channel row with its own `latest`/`unread`/`muted`; identity is
+  `(id, threadId)`.
+- `InboxReadFrame` / `InboxMuteFrame` gain `threadId?` to address a thread row.
+- Parsers accept the new optional fields on messages, inbox rows, and the two upstream
+  frames, and reject wrong-typed ones. Frames without them are unchanged.
+
 ## 0.3.0
+
 
 ### Changed
 

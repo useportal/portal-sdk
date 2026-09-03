@@ -87,7 +87,10 @@ const isWireMessage = (v: unknown): v is WireMessage =>
   opt(v["to"], isStr) &&
   (v["mentions"] === undefined || arrayOf(v["mentions"], isMention)) &&
   isBool(v["retracted"]) &&
-  isBool(v["ephemeral"]);
+  isBool(v["ephemeral"]) &&
+  opt(v["threadParentId"], isStr) &&
+  opt(v["threadSeq"], isNum);
+
 
 const isChannelInfo = (v: unknown): v is ChannelInfo =>
   isRec(v) &&
@@ -127,7 +130,11 @@ const isReadyPresence = (v: unknown): v is ReadyPresence => {
 const isInboxEntryWire = (v: unknown): v is InboxEntryWire =>
   isRec(v) &&
   isStr(v["id"]) &&
+  opt(v["threadId"], isStr) &&
+  opt(v["parentThreadId"], isStr) &&
+  opt(v["rootThreadId"], isStr) &&
   opt(v["name"], isStr) &&
+
   opt(v["meta"], isRec) &&
   opt(v["latest"], isLatest) &&
   isNum(v["unread"]) &&
@@ -213,10 +220,11 @@ const CHANNEL_CLIENT_FRAMES: Record<ChannelClientFrame["t"], Validator> = {
 };
 
 const INBOX_CLIENT_FRAMES: Record<InboxClientFrame["t"], Validator> = {
-  read: (v) => isStr(v["channelId"]),
+  read: (v) => isStr(v["channelId"]) && opt(v["threadId"], isStr),
   "item.read": (v) => isStr(v["id"]),
   "read.all": () => true,
-  mute: (v) => isStr(v["channelId"]) && isBool(v["muted"]),
+  mute: (v) => isStr(v["channelId"]) && isBool(v["muted"]) && opt(v["threadId"], isStr),
+
   ping: () => true,
 };
 

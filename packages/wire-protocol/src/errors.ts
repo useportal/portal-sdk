@@ -69,15 +69,28 @@ export type PublishErrorCode =
   | "not_permitted"
   | "blocked_by_middleware"
   | "content_too_large"
-  | "rate_limited";
+  | "rate_limited"
+  | "validation_failed";
+
+/**
+ * Why a publish failed validation — the `reason` carried by a `validation_failed`
+ * rejection.
+ *
+ * - `thread_depth_exceeded` — the `threadParentId` would nest the reply deeper than the
+ *   platform allows.
+ */
+export type ValidationFailedReason = "thread_depth_exceeded";
 
 /**
  * Body of a rejected publish (§3.1).
  *
  * SPEC: §3.1 specifies the shape as `4xx { code, reason? }` but does not map each code
  * to a status, so no status record is exported here (unlike {@link REFUSAL_STATUS}).
+ *
+ * A `validation_failed` body carries a machine-readable {@link ValidationFailedReason};
+ * every other code's `reason` is free-form copy.
  */
-export type PublishErrorBody = {
-  code: PublishErrorCode;
-  reason?: string;
-};
+export type PublishErrorBody =
+  | { code: "validation_failed"; reason?: ValidationFailedReason }
+  | { code: Exclude<PublishErrorCode, "validation_failed">; reason?: string };
+
