@@ -521,3 +521,275 @@ describe("threads registry", () => {
     expect(byRoot.threads[0]).toMatchObject({ id: "m_2", parentThreadId: "m_1", depth: 1 });
   });
 });
+
+// ── Invariant sweep ───────────────────────────────────────────
+// Every path through send(), the lens lifecycle, and the buffer floor, against the rules:
+//   (a) a thread id never leaves on the ephemeral lane, on any route, and a degraded route
+//       is refused before anything else;
+//   (b) a lens loads on its first subscription of any kind, and a lens nobody holds is not
+//       re-fetched on the next session;
+//   (c) the channel view is exactly the seq range the channel itself has loaded, and a thread
+//       page can neither widen nor narrow it;
+//   (d) the thread's paging cursor never regresses because of an own reply whose position
+//       is not yet known.
+
+describe("send(): every route against the thread rules", () => {
+  it("refuses a degraded extension route before the thread rules apply", async () => {
+    const { channel } = setup((ctx) => ctx.ready({ bindings: { "ns1.": "ws" } }));
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    // The channel has no degraded namespaces until a degraded status lands, so a ws-bound
+    // thread reply is the thread rule's refusal, not the degraded one.
+    await expect(
+      channel.thread("m_1").send({ type: "ns1.move", content: {} }),
+    ).rejects.toBeInstanceOf(NotYetSupportedError);
+  });
+
+  it("rolls back a thread reply on a network failure, leaving both views empty", async () => {
+    const http = new MockHttpClient();
+    http.publish = () => Promise.reject(new Error("offline"));
+    const { channel } = setup((ctx) => ctx.ready({ seq: 1 }), http);
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    const thread = channel.thread("m_1");
+
+    const pending = thread.send({ content: { text: "x" } });
+    expect(thread.messages).toHaveLength(1);
+    await expect(pending).rejects.toMatchObject({ code: "network_error" });
+    expect(thread.messages).toHaveLength(0);
+    expect(channel.messages).toHaveLength(0);
+  });
+
+  it("carries mentions and to on a thread reply exactly as on a channel send", async () => {
+    const { channel, http } = setup((ctx) => ctx.ready({ seq: 1 }));
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    await channel.thread("m_1").send({
+      content: { text: "x" },
+      mentions: [{ userId: "u_2" }],
+      to: "u_2",
+      type: "note",
+    });
+    expect(http.publishCalls[0]?.body).toEqual({
+      content: { text: "x" },
+      type: "note",
+      to: "u_2",
+      mentions: [{ userId: "u_2" }],
+      threadParentId: "m_1",
+    });
+  });
+});
+
+describe("lens lifecycle", () => {
+  it("treats on() as a subscription: it triggers the initial page", async () => {
+    const { channel, http } = setup((ctx) => ctx.ready(), undefined, { history: "none" });
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+
+    channel.thread("m_1").on("message", () => {});
+    expect(http.historyCalls.map((c) => c.query.threadParentId)).toEqual(["m_1"]);
+  });
+
+  it("does not re-fetch a lens nobody holds when the channel reconnects after a teardown", async () => {
+    vi.useFakeTimers();
+    const { channel, http } = setup((ctx) => ctx.ready(), undefined, { history: "none" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const off = channel.thread("m_1").subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.historyCalls).toHaveLength(1);
+    off();
+    off(); // idempotent: a second release must not drive the count negative
+
+    channel.release();
+    await vi.advanceTimersByTimeAsync(GRACE_MS + 1);
+    channel.acquire();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.historyCalls).toHaveLength(1);
+
+    // A fresh subscription in the new session loads again.
+    channel.thread("m_1").subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.historyCalls).toHaveLength(2);
+  });
+
+  it("defers the initial page until the channel connects when subscribed before acquire", async () => {
+    const server = new MockSocketServer((ctx) => ctx.ready());
+    const http = new MockHttpClient();
+    setSocketFactory(server.factory);
+    setHttpClientFactory(http.factory);
+    const channel = new Portal({ apiKey: "pk", token: "jwt" }).channel("room", { history: "none" });
+
+    channel.thread("m_1").subscribe(() => {});
+    expect(http.historyCalls).toHaveLength(0);
+
+    channel.acquire();
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    expect(http.historyCalls.map((c) => c.query.threadParentId)).toEqual(["m_1"]);
+  });
+
+  it("drops the loaded state on teardown so a held lens starts clean, and clears loading flags", async () => {
+    vi.useFakeTimers();
+    let release: (() => void) | undefined;
+    const http = new MockHttpClient();
+    http.history = (channelId, query) => {
+      http.historyCalls.push({ channelId, query });
+      return new Promise((resolve) => {
+        release = () => resolve({ msgs: [reply(2, "m_1", 1)], hasMore: true });
+      });
+    };
+    const { channel } = setup((ctx) => ctx.ready(), http, { history: "none" });
+    await vi.advanceTimersByTimeAsync(0);
+    const thread = channel.thread("m_1");
+    thread.subscribe(() => {});
+    void thread.loadPrevious().catch(() => {});
+    expect(thread.isLoadingPrevious).toBe(true);
+
+    channel.release();
+    await vi.advanceTimersByTimeAsync(GRACE_MS + 1);
+    expect(thread.isLoadingPrevious).toBe(false);
+    expect(thread.messages).toHaveLength(0);
+
+    // The stale page resolving after the teardown lands nowhere.
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(thread.messages).toHaveLength(0);
+    expect(thread.hasPrevious).toBe(true);
+  });
+
+  it("passes status and presence events through unfiltered", async () => {
+    const statuses: string[] = [];
+    const { channel, server } = setup((ctx) => ctx.ready());
+    channel.thread("m_1").on("status", (s) => statuses.push(s));
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    server.socket?.emit({ type: "closed" });
+    // A publish-capable channel degrades to HTTP on a socket drop; the lens sees the same.
+    expect(statuses).toEqual(["ready", "degraded-http"]);
+    expect(channel.status).toBe("degraded-http");
+  });
+
+  it("applies a retraction that outran its reply, inside the thread lens", async () => {
+    const { channel } = setup((ctx) => {
+      ctx.ready({ seq: 1 });
+      ctx.send({ t: "retract", id: "m_2", seq: 2 });
+      ctx.send({ t: "batch", msgs: [reply(2, "m_1", 1)] });
+    });
+    await vi.waitFor(() => expect(channel.thread("m_1").messages).toHaveLength(1));
+    expect(channel.thread("m_1").messages[0]).toMatchObject({ id: "m_2", retracted: true });
+  });
+
+  it("lands a reply delivered on a direct frame in its lens", async () => {
+    const { channel } = setup((ctx) => {
+      ctx.ready({ seq: 1 });
+      ctx.send({ t: "direct", msg: reply(2, "m_1", 1, { to: "u_test" }) });
+    });
+    await vi.waitFor(() => expect(channel.thread("m_1").messages).toHaveLength(1));
+  });
+});
+
+describe("the channel view's range versus thread pages", () => {
+  it("shows a thread-page reply that falls inside the channel's own loaded range", async () => {
+    const http = new MockHttpClient({
+      onHistory: (_c, q) =>
+        q.threadParentId === "m_1"
+          ? { msgs: [reply(9, "m_1", 1)], hasMore: false }
+          : { msgs: [msg(8), msg(10)], hasMore: false }, // the channel page skipped 9
+    });
+    const { channel } = setup((ctx) => ctx.ready({ seq: 10 }), http);
+    await vi.waitFor(() => expect(channel.messages).toHaveLength(2));
+
+    const thread = channel.thread("m_1");
+    thread.subscribe(() => {});
+    await vi.waitFor(() => expect(thread.messages).toHaveLength(1));
+    // In range, so it belongs to the channel's view too — and in seq order.
+    expect(ids(channel.messages)).toEqual(["m_8", "m_9", "m_10"]);
+  });
+
+  it("reveals a thread-page reply once the channel's own paging reaches it", async () => {
+    const http = new MockHttpClient({
+      onHistory: (_c, q) => {
+        if (q.threadParentId === "m_1") return { msgs: [reply(6, "m_1", 1)], hasMore: false };
+        if (q.before === undefined) return { msgs: [msg(8), msg(9)], hasMore: true };
+        return { msgs: [msg(5), msg(7)], hasMore: false }; // server omits 6: a retracted-and-purged gap, say
+      },
+    });
+    const { channel } = setup((ctx) => ctx.ready({ seq: 9 }), http);
+    await vi.waitFor(() => expect(channel.messages).toHaveLength(2));
+    const thread = channel.thread("m_1");
+    thread.subscribe(() => {});
+    await vi.waitFor(() => expect(thread.messages).toHaveLength(1));
+    expect(ids(channel.messages)).toEqual(["m_8", "m_9"]);
+
+    await channel.loadPrevious();
+    expect(ids(channel.messages)).toEqual(["m_5", "m_6", "m_7", "m_8", "m_9"]);
+  });
+
+  it("with history none, the channel view is the live stream only, whatever threads loaded", async () => {
+    const http = new MockHttpClient({
+      onHistory: () => ({ msgs: [reply(3, "m_1", 1), reply(4, "m_1", 2)], hasMore: false }),
+    });
+    const { channel, server } = setup((ctx) => ctx.ready({ seq: 10 }), http, { history: "none" });
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    channel.thread("m_1").subscribe(() => {});
+    await vi.waitFor(() => expect(channel.thread("m_1").messages).toHaveLength(2));
+    expect(channel.messages).toHaveLength(0);
+
+    server.socket?.emit({ type: "message", data: serializeFrame({ t: "batch", msgs: [msg(11)] }) });
+    expect(ids(channel.messages)).toEqual(["m_11"]);
+    // And the channel's first older page is asked for from its own edge, not the thread's.
+    void channel.loadPrevious();
+    expect(http.historyCalls.at(-1)?.query).toEqual({ before: 11, limit: 50 });
+  });
+});
+
+describe("the thread cursor and own replies", () => {
+  it("adopts the position from the wire echo, so the next older page starts from the own reply", async () => {
+    const http = new MockHttpClient({
+      onPublish: () => ({ ok: true, ack: { id: "m_own", seq: 5, timestamp: 0 } }),
+      onHistory: () => ({ msgs: [], hasMore: false }),
+    });
+    const { channel, server } = setup((ctx) => ctx.ready({ seq: 4 }), http, { history: "none" });
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    const thread = channel.thread("m_1");
+    await thread.send({ content: { text: "mine" } });
+
+    // Before the echo, the reply's position is unknown: the cursor falls back to the latest page.
+    void thread.loadPrevious();
+    expect(http.historyCalls.at(-1)?.query).toEqual({ threadParentId: "m_1", limit: 50 });
+    await vi.waitFor(() => expect(thread.isLoadingPrevious).toBe(false));
+
+    server.socket?.emit({
+      type: "message",
+      data: serializeFrame({ t: "batch", msgs: [reply(5, "m_1", 3, { id: "m_own" })] }),
+    });
+    expect(ids(thread.messages)).toEqual(["m_own"]);
+    // hasPrevious was set false by the empty page above; a later session would page from 3.
+    expect(thread.hasPrevious).toBe(false);
+  });
+
+  it("keeps own pending and acked replies in the lens across an unrelated thread's page", async () => {
+    const http = new MockHttpClient({
+      onPublish: () => ({ ok: true, ack: { id: "m_own", seq: 5, timestamp: 0 } }),
+      onHistory: (_c, q) =>
+        q.threadParentId === "m_2" ? { msgs: [reply(3, "m_2", 1)], hasMore: false } : { msgs: [], hasMore: false },
+    });
+    const { channel } = setup((ctx) => ctx.ready({ seq: 4 }), http, { history: "none" });
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    const mine = channel.thread("m_1");
+    const pending = mine.send({ content: { text: "mine" } });
+    const other = channel.thread("m_2");
+    other.subscribe(() => {});
+    // The other thread's page request is in flight; the own reply is still pending here.
+    expect(mine.messages.map((m) => m.status)).toEqual(["pending"]);
+    expect(other.messages).toHaveLength(0);
+    await pending;
+    await vi.waitFor(() => expect(other.messages).toHaveLength(1));
+    expect(mine.messages.map((m) => m.status)).toEqual(["sent"]);
+    expect(ids(other.messages)).toEqual(["m_3"]);
+    expect(ids(channel.messages)).toEqual(["m_own"]); // m_3 is below the channel's own range
+  });
+});
+
+describe("threads registry query precedence", () => {
+  it("sends root when both root and parent are given", async () => {
+    const { channel, http } = setup((ctx) => ctx.ready());
+    await channel.threads({ root: "m_1", parent: "m_2" });
+    expect(http.threadCalls[0]?.query).toEqual({ root: "m_1" });
+  });
+});
