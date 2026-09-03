@@ -112,9 +112,15 @@ export interface PersistentSend<M> {
    * Reply into a thread: the id of the message being replied to. The first reply to a
    * message creates its thread — there is no create call. Nesting deeper than the platform
    * allows rejects with a {@link BlockedError} whose `reason` is `"thread_depth_exceeded"`.
+   *
+   * A reply is persistent by definition: a `type` bound to an extension's ephemeral
+   * transport cannot carry it and rejects with `NotYetSupportedError`. A `type` bound to an
+   * extension's HTTP transport publishes it like any extension send (no optimistic insert;
+   * the reply reaches the thread through the channel).
    */
   threadParentId?: string;
 }
+
 
 
 export interface EphemeralSend<M> {

@@ -25,7 +25,8 @@ import {
 import type { ResolvedHosts } from "./config.js";
 import type { Credentials } from "./credentials.js";
 import { Emitter } from "./emitter.js";
-import { BlockedError, DegradedError, PortalError } from "./errors.js";
+import { BlockedError, DegradedError, NotYetSupportedError, PortalError } from "./errors.js";
+
 import { getHttpClientFactory } from "./http/factory.js";
 import type { HttpClient } from "./http/types.js";
 import { Keepalive } from "./keepalive.js";
@@ -104,7 +105,13 @@ const toThreadNode = (wire: ThreadNodeWire): ThreadNode => ({
   createdAt: wire.createdAt,
 });
 
+const threadOnEphemeralLane = (type: string | undefined): NotYetSupportedError =>
+  new NotYetSupportedError(
+    `A send of type "${type ?? "message"}" travels as an ephemeral frame and cannot be addressed to a thread.`,
+  );
+
 const validationMessage = (reason: string | undefined): string =>
+
   reason === "thread_depth_exceeded"
     ? "The reply would nest deeper than this channel allows."
     : "The message failed validation.";
@@ -392,6 +399,9 @@ export class ChannelConnection {
   // ── Sending ───────────────────────────────────────────────
 
   send(input: SendInput<unknown>): Promise<SendAck> {
+    // A thread reply is persistent by definition: the ephemeral lane has no thread field, so
+    // anything that would travel on it is refused outright rather than losing its thread.
+    const threadParentId = (input as { threadParentId?: string }).threadParentId;
     const route = this.#extensionRoute(input.type);
     if (route !== undefined) {
       if (this.#degraded.has(route.namespace)) {
@@ -399,15 +409,22 @@ export class ChannelConnection {
           new DegradedError(`The "${route.namespace}" extension is degraded.`),
         );
       }
-      return route.transport === "ws"
-        ? this.#sendEphemeralFrame(input.type, input.content)
-        : this.#publishOnce(input);
+      if (route.transport === "ws") {
+        if (threadParentId !== undefined) return Promise.reject(threadOnEphemeralLane(input.type));
+        return this.#sendEphemeralFrame(input.type, input.content);
+      }
+      // HTTP-routed extension sends publish with `threadParentId` in the body and, as for
+      // every extension publish, without an optimistic insert; the reply reaches the thread
+      // lens through the channel.
+      return this.#publishOnce(input);
     }
     if (input.ephemeral === true) {
+      if (threadParentId !== undefined) return Promise.reject(threadOnEphemeralLane(input.type));
       return this.#sendEphemeralFrame(input.type, input.content);
     }
     return this.#sendPersistent(input);
   }
+
 
   async #sendPersistent(input: SendInput<unknown>): Promise<SendAck> {
     const tempId = this.#nextTag();

@@ -3,7 +3,17 @@
 All notable changes to this package are documented here. This package is versioned
 independently of the other `@portalsdk` packages.
 
+## 0.2.1
+
+### Fixed
+
+- A thread reply whose `type` is bound to an extension's ephemeral transport (or an
+  `ephemeral: true` send carrying `threadParentId`) now rejects with `NotYetSupportedError`
+  instead of leaving as an ephemeral frame without its thread. Types bound to an extension's
+  HTTP transport publish the reply with `threadParentId`, as before.
+
 ## 0.2.0
+
 
 ### Added
 

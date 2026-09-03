@@ -100,14 +100,15 @@ export class ThreadHandleImpl implements ThreadHandle<unknown> {
 
   // ── Write plane ───────────────────────────────────────────
 
+  /**
+   * Routing is the connection's: an ephemeral send, or a type bound to an extension's
+   * ephemeral transport, is refused with `NotYetSupportedError` rather than sent without
+   * its thread.
+   */
   send(input: ThreadSendInput<unknown>): Promise<SendAck> {
-    if ((input as { ephemeral?: boolean }).ephemeral === true) {
-      return Promise.reject(
-        new NotYetSupportedError("An ephemeral send cannot be addressed to a thread."),
-      );
-    }
     return this.#connection.send({ ...input, threadParentId: this.threadId });
   }
+
 
   loadPrevious(): Promise<boolean> {
     return this.#connection.loadThreadPrevious(this.threadId);

@@ -341,7 +341,48 @@ describe("sending into a thread", () => {
     expect(channel.messages).toHaveLength(0);
   });
 
+  it("refuses a type bound to an extension's ephemeral transport, from both entry points", async () => {
+    const { channel, server } = setup((ctx) => ctx.ready({ bindings: { "ns1.": "ws" } }));
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    const framesBefore = server.socket?.sent.length;
+
+    await expect(
+      channel.thread("m_1").send({ type: "ns1.move", content: { at: 3 } }),
+    ).rejects.toBeInstanceOf(NotYetSupportedError);
+    await expect(
+      channel.send({ type: "ns1.move", content: { at: 3 }, threadParentId: "m_1" }),
+    ).rejects.toBeInstanceOf(NotYetSupportedError);
+
+    // Nothing left the client, and the same type without a thread still routes as before.
+    expect(server.socket?.sent.length).toBe(framesBefore);
+    await channel.send({ type: "ns1.move", content: { at: 3 } });
+    expect(server.socket?.received.at(-1)).toMatchObject({ t: "ephemeral", type: "ns1.move" });
+    expect(channel.thread("m_1").messages).toHaveLength(0);
+  });
+
+  it("publishes a type bound to an extension's HTTP transport with the thread id, no optimistic insert", async () => {
+    const http = new MockHttpClient({
+      onPublish: () => ({ ok: true, ack: { id: "e_1", seq: 2, timestamp: 0 } }),
+    });
+    const { channel, server } = setup((ctx) => ctx.ready({ seq: 1, bindings: { "ns2.": "http" } }), http);
+    await vi.waitFor(() => expect(channel.status).toBe("ready"));
+    const thread = channel.thread("m_1");
+
+    const pending = thread.send({ type: "ns2.do", content: { go: true } });
+    expect(thread.messages).toHaveLength(0);
+    await pending;
+    expect(http.publishCalls.at(-1)?.body).toMatchObject({ type: "ns2.do", threadParentId: "m_1" });
+
+    // The reply reaches the thread lens through the channel, like every extension publish.
+    server.socket?.emit({
+      type: "message",
+      data: serializeFrame({ t: "batch", msgs: [reply(2, "m_1", 1, { id: "e_1", type: "ns2.do" })] }),
+    });
+    expect(ids(thread.messages)).toEqual(["e_1"]);
+  });
+
   it("rejects an ephemeral send addressed to a thread", async () => {
+
     const { channel } = setup((ctx) => ctx.ready());
     await vi.waitFor(() => expect(channel.status).toBe("ready"));
     await expect(
