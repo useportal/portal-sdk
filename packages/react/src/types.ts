@@ -13,7 +13,9 @@ import type {
   PortalError,
   SendAck,
   SendInput,
+  ThreadHandle,
 } from "@portalsdk/core";
+
 
 /** Verified identity of the connected user, once the channel is ready. */
 export type Me = { id: string; anon: boolean; claims: Record<string, unknown> };
@@ -76,7 +78,29 @@ export interface UseChannelResult<M = unknown> {
   status: ChannelStatus;
 }
 
+/**
+ * `useChannel`'s params plus the thread to narrow to. `readOn` has no effect here: a thread
+ * has no read position of its own, and reading a thread never advances the channel's.
+ * `onMessage`/`onMention` fire for this thread's replies only; `where` is the same reserved
+ * surface as on the channel.
+ */
+export type UseThreadParams<M = unknown> = UseChannelParams<M> & { threadId: string };
+
+export interface UseThreadResult<M = unknown> {
+  /** Replies in this thread only, oldest first. */
+  messages: readonly Message<M>[];
+  /** Reply into this thread. */
+  send: ThreadHandle<M>["send"];
+  /** Older replies in this thread only. */
+  loadPrevious: () => Promise<boolean>;
+  hasPrevious: boolean;
+  isLoadingPrevious: boolean;
+  /** The channel's connection status — a thread rides the channel's socket. */
+  status: ChannelStatus;
+}
+
 export interface UseInboxParams<D = unknown> extends InboxQuery<D> {
+
   /**
    * Fires once per item arriving after mount — never for the ready/backlog snapshot, and
    * never twice for the same id (redelivery is deduped, following core's own item-id

@@ -6,7 +6,8 @@
  * they never appear in these types.
  */
 
-import type { PortalError } from "./errors.js";
+import type { BlockedError, PortalError } from "./errors.js";
+
 
 export type Unsubscribe = () => void;
 
@@ -79,7 +80,14 @@ export interface Message<M = unknown> extends Envelope {
    * intentionally open: further delivery states are reserved and not emitted in v1.
    */
   status: "pending" | "sent" | "failed";
+  /**
+   * Present on a reply: the id of the message it answers, which is also the id of the
+   * thread it belongs to (the parent may itself be a reply). Replies are part of the
+   * channel's `messages`; {@link ChannelHandle.thread} narrows to one thread.
+   */
+  threadParentId?: string;
 }
+
 
 // ── send (§4) ───────────────────────────────────────────────
 
@@ -100,7 +108,20 @@ export interface PersistentSend<M> {
   type?: string;
   /** Default "text"; media kinds rejected in v1. */
   kind?: "text";
+  /**
+   * Reply into a thread: the id of the message being replied to. The first reply to a
+   * message creates its thread — there is no create call. Nesting deeper than the platform
+   * allows rejects with a {@link BlockedError} whose `reason` is `"thread_depth_exceeded"`.
+   *
+   * A reply is persistent by definition: a `type` bound to an extension's ephemeral
+   * transport cannot carry it and rejects with `NotYetSupportedError`. A `type` bound to an
+   * extension's HTTP transport publishes it like any extension send (no optimistic insert;
+   * the reply reaches the thread through the channel).
+   */
+  threadParentId?: string;
 }
+
+
 
 export interface EphemeralSend<M> {
   ephemeral: true;
@@ -261,7 +282,20 @@ export interface ChannelHandle<M = unknown> {
   /** Filtered lens over the same store — one socket, N views. */
   view(where: MessageWhere<M>): ChannelView<M>;
 
+  /**
+   * Thread-scoped lens over the same store — one socket, N threads. The same object is
+   * returned for the same id. Lazy: the first subscription fetches the latest page of the
+   * thread's history; live replies arrive through the channel and are filtered in.
+   */
+  thread(threadId: string): ThreadHandle<M>;
+  /**
+   * Which threads exist in this channel — the session's registry, not the inbox. Root
+   * threads by default; see {@link ThreadsQuery}.
+   */
+  threads(query?: ThreadsQuery): Promise<ThreadPage>;
+
   readonly presence: DetailedPresence | AggregatePresence | undefined;
+
 
   /** Transient per-user activity, never self. */
   readonly activity: readonly ActivityEntry[];
@@ -316,11 +350,99 @@ export interface ChannelView<M = unknown> {
   getSnapshot(): { messages: readonly Message<M>[]; unread: number };
 }
 
+// ── Threads ─────────────────────────────────────────────────
+
+/** A send from a {@link ThreadHandle}: persistent, with the thread id supplied by the handle. */
+export type ThreadSendInput<M> = Omit<PersistentSend<M>, "threadParentId">;
+
+export interface ThreadSnapshot<M = unknown> {
+  messages: readonly Message<M>[];
+  isLoadingPrevious: boolean;
+  hasPrevious: boolean;
+}
+
+/**
+ * A lens over one thread of a channel. It owns no connection: the channel handle's refcount
+ * governs the socket, and the thread's replies are the channel's own messages narrowed to
+ * `threadParentId === threadId`.
+ */
+export interface ThreadHandle<M = unknown> {
+  readonly threadId: string;
+  /** Replies in this thread only, oldest first, with own unacked sends appended. */
+  readonly messages: readonly Message<M>[];
+  /** Reply into this thread. */
+  send(input: ThreadSendInput<M>): Promise<SendAck>;
+  /**
+   * Older replies in THIS thread — the page before the oldest loaded reply, prepended into
+   * `messages`. Page size follows the channel's `history` option (50 when `"none"`). Resolves
+   * `false` once the thread's first reply has been reached; concurrent calls share the
+   * in-flight promise.
+   */
+  loadPrevious(): Promise<boolean>;
+  readonly isLoadingPrevious: boolean;
+  /** Starts `true`; flips to `false` once `loadPrevious` reaches the thread's first reply. */
+  readonly hasPrevious: boolean;
+  /** Reserved surface, as on the channel: typed, rejected at runtime. */
+  view(where: MessageWhere<M>): ChannelView<M>;
+  /**
+   * `message`/`mention`/`retract` are narrowed to this thread; `presence`/`activity`/`status`
+   * are the channel's own.
+   */
+  on<E extends keyof ChannelEvents<M>>(event: E, fn: ChannelEvents<M>[E]): Unsubscribe;
+  /** useSyncExternalStore-shaped store contract. Subscribing triggers the lazy initial fetch. */
+  subscribe(listener: () => void): Unsubscribe;
+  getSnapshot(): ThreadSnapshot<M>;
+}
+
+export interface ThreadsQuery {
+  /** Threads nested directly under this thread; `null` (or omitted) lists root threads. */
+  parent?: string | null;
+  /** Every thread descending from this root, at any depth. Takes precedence over `parent`. */
+  root?: string;
+  limit?: number;
+}
+
+export interface ThreadNode {
+  /** The thread id — the id of the message whose first reply created it. */
+  id: string;
+  /** The enclosing thread; absent on a root thread. */
+  parentThreadId?: string;
+  /** The top-level ancestor; equals `id` on a root thread. */
+  rootThreadId: string;
+  /** Nesting level; a root thread is `0`. */
+  depth: number;
+  /** Who sent the message the thread hangs off. */
+  spawnedBy: { id: string };
+  /** Number of replies in the thread. */
+  messageCount: number;
+  createdAt: number;
+}
+
+export interface ThreadPage {
+  threads: readonly ThreadNode[];
+  hasMore: boolean;
+  /** The next page; an empty page with `hasMore: false` once exhausted. */
+  next(): Promise<ThreadPage>;
+}
+
 // ── Inbox (§5) ──────────────────────────────────────────────
 
 export interface InboxEntry {
   id: string;
+  /**
+   * Present on a thread entry. Thread entries are siblings of their channel's entry — same
+   * `id`, own `latest`/`unread`/`muted`/read position; identity is `(id, threadId)`. No
+   * entry's state reflects another's traffic. The pointers are for rendering (nesting,
+   * ordering within a parent, choosing which sub-thread to show); the SDK selects and
+   * aggregates nothing across entries.
+   */
+  threadId?: string;
+  /** The enclosing thread, on a nested thread entry. Absent on a root thread entry. */
+  parentThreadId?: string;
+  /** The top-level thread; equals `threadId` on a root thread entry. */
+  rootThreadId?: string;
   name?: string;
+
   meta?: Record<string, unknown>;
   /** Absent on >100-member channels (seq-only tier). */
   latest?: { text: string; sender: { id: string }; at: number };
@@ -335,18 +457,23 @@ export interface InboxEntry {
   /** Recency (sort key). */
   at: number;
   /**
-   * Advances the INBOX position for this channel only — clears the sidebar badge. Fully
-   * independent of the channel's own watermark.
+   * Advances the INBOX position for this entry only — clears its badge. Fully independent
+   * of the channel's own watermark, and of every sibling entry.
    */
   markAsRead(): void;
+
   mute(): void;
   unmute(): void;
 }
 
 export interface InboxEntries extends ReadonlyArray<InboxEntry> {
-  /** ALWAYS hits the full registry, ignoring any view filter. */
-  get(id: string): InboxEntry | undefined;
+  /**
+   * ALWAYS hits the full registry, ignoring any view filter. Identity is `(id, threadId)`:
+   * without `threadId` this is the channel's own entry, never one of its thread entries.
+   */
+  get(channelId: string, threadId?: string): InboxEntry | undefined;
 }
+
 
 export interface InboxItem<D = unknown> {
   /** Event ID (idempotency key). */

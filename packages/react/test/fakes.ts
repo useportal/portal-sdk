@@ -6,7 +6,9 @@ import {
   type ChannelHandle,
   type ChannelSnapshot,
   type Portal,
+  type ThreadPage,
 } from "@portalsdk/core";
+
 
 /**
  * A fake {@link ChannelHandle} implementing core's *public* contract with spies and a
@@ -25,7 +27,12 @@ export interface FakeChannel<M = unknown> {
   ): void;
 }
 
+function emptyThreadPage(): ThreadPage {
+  return { threads: [], hasMore: false, next: async () => emptyThreadPage() };
+}
+
 function defaultSnapshot<M>(): ChannelSnapshot<M> {
+
   return {
     messages: [],
     presence: undefined,
@@ -90,6 +97,12 @@ export function makeFakeChannel<M = unknown>(): FakeChannel<M> {
     },
     members: vi.fn(async () => []),
     setMetadata: vi.fn(),
+    thread: vi.fn(() => {
+      throw new Error("fake channel has no thread lens");
+    }),
+    threads: vi.fn(async () => emptyThreadPage()),
+
+
     get status() {
       return snapshot.status;
     },

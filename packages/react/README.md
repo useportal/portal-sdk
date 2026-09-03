@@ -110,7 +110,31 @@ workaround still works (the handle is unchanged), but isn't necessary anymore.
 
 Content types are per call site: `useChannel<M>({ … })`.
 
+`messages` includes replies — messages carrying `threadParentId`, the id of the message they
+answer. Filter them out to render a flat timeline, or use `useThread` to render one thread.
+
+## `useThread`
+
+```ts
+const { messages, send, loadPrevious, hasPrevious, isLoadingPrevious, status } =
+  useThread<M>({ channelId, threadId, history, onMessage, onMention, onError });
+```
+
+One thread of a channel: the same params as `useChannel` plus `threadId` — the id of the
+message the thread hangs off (the first reply creates it). The hook shares the channel's
+connection with every other hook on that channel, opening it if nothing else has, and holds
+it only while mounted. The first mount loads the thread's latest replies; `loadPrevious`
+pages that thread alone.
+
+- `messages` — this thread's replies only, oldest first. It re-renders for this thread's
+  changes, not for the rest of the channel.
+- `send` — replies into this thread. Nesting deeper than the platform allows rejects with a
+  `BlockedError` whose `reason` is `"thread_depth_exceeded"`.
+- `onMessage` / `onMention` — fire for this thread's replies only. `readOn` has no effect: a
+  thread has no read position of its own.
+
 ## `useInbox`
+
 
 ```ts
 const { channels, items, counter, unseen, markAllRead, status } = useInbox<D>({
@@ -123,6 +147,11 @@ const { channels, items, counter, unseen, markAllRead, status } = useInbox<D>({
 - `unseen` — unseen items **within this view's filter**.
 - `markAllRead` — global, zero-arg.
 - `channelId` / `where` — scope the view.
+- Thread entries sit beside their channel's entry with their own `unread`, `latest` and
+  `muted`, carrying `threadId` / `parentThreadId` / `rootThreadId` for rendering;
+  `channels.get(channelId, threadId)` addresses one. Which sub-thread to show, and any
+  roll-up across a tree, is the app's call.
+
 - `onItem` — fires once per item arriving after mount. Never fires for the items already
   present when the inbox becomes ready (that's what `items` is for), and never fires twice for
   the same item — a redelivered item updates its data in `items` but doesn't re-announce

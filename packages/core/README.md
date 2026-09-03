@@ -88,7 +88,26 @@ A `ChannelHandle` exposes a reactive window and the operations over it:
 
 Content types are per call site: `portal.channel<M>(id)`.
 
+## Threads
+
+A reply is a message with `threadParentId` — the id of the message it answers, which is also
+the thread's id. The first reply creates the thread. Replies are part of `channel.messages`;
+`channel.thread(id)` is a lens narrowed to one thread over the same socket.
+
+```ts
+const thread = channel.thread(rootMessage.id);
+const off = thread.subscribe(() => render(thread.messages)); // first subscription loads the thread
+await thread.send({ content: "replying in thread" });
+await thread.loadPrevious(); // older replies in this thread only
+
+const { threads, hasMore, next } = await channel.threads(); // root threads; { parent } / { root } to go deeper
+```
+
+Inbox entries for threads sit beside the channel's entry, each with its own `unread`, `latest`
+and `muted`: `inbox.channels.get(channelId, threadId)`.
+
 ## Inbox
+
 
 ```ts
 const inbox = portal.inbox(); // lazy singleton, connects on first use

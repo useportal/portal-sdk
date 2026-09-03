@@ -11,7 +11,18 @@ import type { PingFrame, PongFrame } from "./channel.js";
 export type InboxEntryWire = {
   /** The channel id this row tracks. */
   id: string;
+  /**
+   * Present on a thread row. A thread row is a sibling of its channel's row (same `id`,
+   * distinct `threadId`) with its own `latest`, `unread`, read position, and `muted`; no
+   * row's state ever reflects another row's traffic. Identity is `(id, threadId)`.
+   */
+  threadId?: string;
+  /** The enclosing thread, on a nested thread row. Absent on a root thread row. */
+  parentThreadId?: string;
+  /** The top-level thread this row descends from; equals `threadId` on a root thread row. */
+  rootThreadId?: string;
   name?: string;
+
   meta?: Record<string, unknown>;
   /** Preview of the most recent message. Absent on large channels (seq-only tier). */
   latest?: {
@@ -96,7 +107,10 @@ export type InboxServerFrame =
 export type InboxReadFrame = {
   t: "read";
   channelId: string;
+  /** Address a thread row instead of the channel row. */
+  threadId?: string;
 };
+
 
 /** Flip one item's read flag (§5). Never cascades to older items. */
 export type InboxItemReadFrame = {
@@ -114,7 +128,10 @@ export type InboxMuteFrame = {
   t: "mute";
   channelId: string;
   muted: boolean;
+  /** Address a thread row instead of the channel row. */
+  threadId?: string;
 };
+
 
 /** The complete upstream set for an inbox socket (§5). */
 export type InboxClientFrame =

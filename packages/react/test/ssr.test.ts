@@ -6,9 +6,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { PortalProvider } from "../src/index.js";
-import type { UseChannelResult, UseInboxResult } from "../src/types.js";
+import type { UseChannelResult, UseInboxResult, UseThreadResult } from "../src/types.js";
 import { useChannel } from "../src/use-channel.js";
 import { useInbox } from "../src/use-inbox.js";
+import { useThread } from "../src/use-thread.js";
+
 import { isServerEnvironment } from "../src/ssr.js";
 import { makeFakePortal, type FakePortal } from "./fakes.js";
 
@@ -84,7 +86,29 @@ describe("useChannel is SSR-inert", () => {
   });
 });
 
+describe("useThread is SSR-inert", () => {
+  it("renders an idle snapshot without throwing, and never touches the registry", async () => {
+    const fake = makeFakePortal();
+    let captured: UseThreadResult | undefined;
+    function Probe() {
+      captured = useThread({ channelId: "room", threadId: "m_1", onMessage: vi.fn() });
+      return null;
+    }
+
+    expect(() => renderProbe(fake, Probe)).not.toThrow();
+
+    expect(captured?.status).toBe("idle");
+    expect(captured?.messages).toEqual([]);
+    expect(captured?.hasPrevious).toBe(false);
+    expect(captured?.isLoadingPrevious).toBe(false);
+    await expect(captured?.send({ content: "hi" })).rejects.toThrow();
+    await expect(captured?.loadPrevious()).resolves.toBe(false);
+    expect(fake.channel("room")).toBeUndefined();
+  });
+});
+
 describe("useInbox is SSR-inert", () => {
+
   it("renders an idle snapshot without throwing or connecting", () => {
     const fake = makeFakePortal();
     let captured: UseInboxResult | undefined;

@@ -1,6 +1,6 @@
 {
   "name": "@portalsdk/react",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "React bindings — hooks and providers wrapping the Portal core client.",
   "license": "MIT",
   "type": "module",

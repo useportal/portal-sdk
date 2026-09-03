@@ -10,9 +10,12 @@ interface OptimisticMessage {
   content: unknown;
   to: string | undefined;
   mentions: { userId: string }[] | undefined;
+  threadParentId?: string | undefined;
   timestamp: number;
   status: "pending" | "failed";
 }
+
+
 
 /** Who "I" am, for stamping optimistic messages before the ack arrives. */
 interface Me {
@@ -28,6 +31,13 @@ interface Me {
  * Persistent messages are keyed by `seq` (the dedup key) and always rendered in seq order.
  * `seq` never escapes into the public {@link Message}. Ephemeral messages (no seq) are not
  * stored — they are handed back for event dispatch only.
+ *
+ * Replies are ordinary persistent messages carrying `threadParentId`. They reach the buffer
+ * two ways: through the channel (live, backfill, paging, gap-fill, own acks), in which case
+ * they are part of the channel's own view; or through a thread page, which may reach further
+ * back than the channel view does. One map holds both, so a reply seen both ways is stored
+ * once; `#floor` marks how far down the channel view extends, and a thread page never lowers
+ * it.
  */
 export class MessageBuffer {
   readonly #channelId: string;
@@ -35,6 +45,15 @@ export class MessageBuffer {
   /** Seqs whose retraction outran the message; applied when the message arrives. */
   readonly #pendingRetracts = new Set<number>();
   readonly #optimistic: OptimisticMessage[] = [];
+  /**
+   * Lowest seq reached through the channel itself — the `before=` cursor for the channel's
+   * next older page, and the lower edge of {@link messages}. Messages held below it came
+   * from a thread page and belong to that thread's view only.
+   */
+  #floor: number | undefined;
+  /** Per-thread "older replies exist" flag; optimistic (`true`) until a page says otherwise. */
+  readonly #threadHasPrevious = new Map<string, boolean>();
+
 
   #me: Me | undefined;
   /**
@@ -86,13 +105,9 @@ export class MessageBuffer {
     return this.#contiguous;
   }
 
-  /** Lowest seq held — the `before=` cursor for the next older page. */
+  /** Lowest seq reached through the channel — the `before=` cursor for the next older page. */
   lowestSeq(): number | undefined {
-    let lowest: number | undefined;
-    for (const seq of this.#persistent.keys()) {
-      if (lowest === undefined || seq < lowest) lowest = seq;
-    }
-    return lowest;
+    return this.#floor;
   }
 
   hasPrevious(): boolean {
@@ -102,6 +117,72 @@ export class MessageBuffer {
   setHasPrevious(value: boolean): void {
     this.#hasPrevious = value;
   }
+
+  // ── Threads ───────────────────────────────────────────────
+
+  /** Lowest thread position held for a thread — the `before=` cursor for its next older page. */
+  lowestThreadSeq(threadId: string): number | undefined {
+    let lowest: number | undefined;
+    for (const msg of this.#persistent.values()) {
+      if (msg.threadParentId !== threadId || msg.threadSeq === undefined) continue;
+      if (lowest === undefined || msg.threadSeq < lowest) lowest = msg.threadSeq;
+    }
+    return lowest;
+  }
+
+  threadHasPrevious(threadId: string): boolean {
+    return this.#threadHasPrevious.get(threadId) ?? true;
+  }
+
+  setThreadHasPrevious(threadId: string, value: boolean): void {
+    this.#threadHasPrevious.set(threadId, value);
+  }
+
+  /**
+   * Ingest a page of one thread's history. Never lowers the channel's own view.
+   *
+   * Returns the newly stored replies that lie above the contiguous live position: those are
+   * replies the live stream has not delivered yet but will (or is filling a gap for), and
+   * the page has now beaten it to them. They are announced once here; the live copy that
+   * follows is a dedup and stays silent. Replies at or below the position are history and
+   * are never announced, exactly like a channel page.
+   */
+  ingestThreadHistory(msgs: readonly WireMessage[]): Message[] {
+    const live: Message[] = [];
+    const contiguous = this.#contiguous;
+    for (const msg of msgs) {
+      if (msg.seq === null) continue;
+      const stored = this.#store(msg, false);
+      if (stored !== undefined && contiguous !== undefined && msg.seq > contiguous) {
+        live.push(this.#toPublic(stored));
+      }
+    }
+    this.#advanceContiguous();
+    return live;
+  }
+
+
+  /** The thread a held message belongs to, if it is a reply. */
+  threadOf(messageId: string): string | undefined {
+    for (const msg of this.#persistent.values()) {
+      if (msg.id === messageId) return msg.threadParentId;
+    }
+    return undefined;
+  }
+
+  /** One thread's replies in order, with own unacked replies appended. */
+  threadMessages(threadId: string): Message[] {
+    const out: Message[] = [];
+    for (const seq of [...this.#persistent.keys()].sort((a, b) => a - b)) {
+      const msg = this.#persistent.get(seq) as WireMessage;
+      if (msg.threadParentId === threadId) out.push(this.#toPublic(msg));
+    }
+    for (const optimistic of this.#optimistic) {
+      if (optimistic.threadParentId === threadId) out.push(this.#optimisticToPublic(optimistic));
+    }
+    return out;
+  }
+
 
   /**
    * Ingest delivered messages (a `batch` or a `direct`). Persistent ones are stored and
@@ -120,7 +201,7 @@ export class MessageBuffer {
     const delivered: Message[] = [];
     for (const msg of msgs) {
       if (msg.seq === null || msg.ephemeral) continue;
-      const stored = this.#store(msg);
+      const stored = this.#store(msg, true);
       if (stored !== undefined) delivered.push(this.#toPublic(stored));
     }
     this.#advanceContiguous();
@@ -131,10 +212,11 @@ export class MessageBuffer {
   ingestHistory(msgs: readonly WireMessage[]): void {
     for (const msg of msgs) {
       if (msg.seq === null) continue;
-      this.#store(msg);
+      this.#store(msg, true);
     }
     this.#advanceContiguous();
   }
+
 
   /** Apply a retraction, or remember it if its message has not arrived yet. */
   retract(seq: number): void {
@@ -166,11 +248,15 @@ export class MessageBuffer {
       timestamp: ack.timestamp,
       ...(optimistic.to !== undefined ? { to: optimistic.to } : {}),
       ...(optimistic.mentions !== undefined ? { mentions: optimistic.mentions } : {}),
+      ...(optimistic.threadParentId !== undefined
+        ? { threadParentId: optimistic.threadParentId }
+        : {}),
       retracted: false,
       ephemeral: false,
     };
-    this.#store(wire);
+    this.#store(wire, true);
     this.#advanceContiguous();
+
     // Posting advances my own read position, exactly as the server does atomically on the
     // write (§5): my own message must never count as unread to me, on any device.
     if (this.#watermark === undefined || ack.seq > this.#watermark) {
@@ -194,25 +280,48 @@ export class MessageBuffer {
     this.#head = undefined;
     this.#watermark = undefined;
     this.#hasPrevious = true;
+    this.#floor = undefined;
+    this.#threadHasPrevious.clear();
   }
 
   /** The public, seq-ordered window with unacked sends appended. */
   messages(): Message[] {
-    const sorted = [...this.#persistent.keys()].sort((a, b) => a - b);
-    const out: Message[] = sorted.map((seq) =>
-      this.#toPublic(this.#persistent.get(seq) as WireMessage),
-    );
+    const floor = this.#floor;
+    const out: Message[] = [];
+    if (floor !== undefined) {
+      for (const seq of [...this.#persistent.keys()].sort((a, b) => a - b)) {
+        if (seq >= floor) out.push(this.#toPublic(this.#persistent.get(seq) as WireMessage));
+      }
+    }
     for (const optimistic of this.#optimistic) out.push(this.#optimisticToPublic(optimistic));
     return out;
   }
 
   // ── Internals ─────────────────────────────────────────────
 
-  /** Store a persistent message, returning the stored form, or undefined if it was a dup. */
-  #store(msg: WireMessage): WireMessage | undefined {
+  /**
+   * Store a persistent message, returning the stored form, or undefined if it was a dup.
+   * `viaChannel` says whether it arrived through the channel (extending the channel's own
+   * view) or through a thread page (which does not).
+   */
+  #store(msg: WireMessage, viaChannel: boolean): WireMessage | undefined {
     const seq = msg.seq as number;
-    if (this.#persistent.has(seq)) return undefined; // dedup: retries/replays
+    if (viaChannel && (this.#floor === undefined || seq < this.#floor)) this.#floor = seq;
+    const held = this.#persistent.get(seq);
+    if (held !== undefined) {
+      // Dedup: retries/replays. An own reply is stored from its ack, which carries no thread
+      // position; adopt it from the echo so the thread's paging cursor stays exact.
+      if (
+        held.threadSeq === undefined &&
+        msg.threadSeq !== undefined &&
+        held.threadParentId === msg.threadParentId
+      ) {
+        this.#persistent.set(seq, { ...held, threadSeq: msg.threadSeq });
+      }
+      return undefined;
+    }
     const stored = this.#pendingRetracts.has(seq) ? this.#tombstone(msg) : msg;
+
     this.#pendingRetracts.delete(seq);
     this.#persistent.set(seq, stored);
     this.#raiseHead(seq);
@@ -266,8 +375,10 @@ export class MessageBuffer {
       ephemeral: wire.ephemeral,
       unread: this.#isUnread(wire.seq),
       status: "sent",
+      ...(wire.threadParentId !== undefined ? { threadParentId: wire.threadParentId } : {}),
     };
   }
+
 
   /** A persistent message is unread when its seq lies beyond my watermark. */
   #isUnread(seq: number | null): boolean {
@@ -290,6 +401,10 @@ export class MessageBuffer {
       ephemeral: false,
       unread: false,
       status: optimistic.status,
+      ...(optimistic.threadParentId !== undefined
+        ? { threadParentId: optimistic.threadParentId }
+        : {}),
     };
   }
+
 }

@@ -16,14 +16,17 @@ import {
   type PingFrame,
   type PresenceFrame,
   type PublishBody,
+  type ThreadNodeWire,
   type WatermarkFrame,
   type WireMessage,
 } from "@portalsdk/wire-protocol";
 
+
 import type { ResolvedHosts } from "./config.js";
 import type { Credentials } from "./credentials.js";
 import { Emitter } from "./emitter.js";
-import { BlockedError, DegradedError, PortalError } from "./errors.js";
+import { BlockedError, DegradedError, NotYetSupportedError, PortalError } from "./errors.js";
+
 import { getHttpClientFactory } from "./http/factory.js";
 import type { HttpClient } from "./http/types.js";
 import { Keepalive } from "./keepalive.js";
@@ -39,10 +42,16 @@ import type {
   ChannelInfo,
   ChannelSnapshot,
   MemberRow,
+  Message,
   SendAck,
   SendInput,
+  ThreadNode,
+  ThreadPage,
+  ThreadsQuery,
+  Unsubscribe,
 } from "./types.js";
 import { buildChannelUpgradeUrl } from "./url.js";
+
 
 /** Max client-side jitter before a gap-fill range fetch (implementation-notes). */
 const GAP_FILL_MAX_JITTER_MS = 2_000;
@@ -75,6 +84,46 @@ export interface ConnectionDeps {
   history: number | "none";
 }
 
+/** Per-thread session state behind a thread lens. Replies themselves live in the buffer. */
+interface ThreadState {
+  /** Live lens subscriptions; a subscribed thread is re-fetched on the next connect. */
+  subscribers: number;
+  /** The initial page has been requested this session (a failure clears it for a retry). */
+  loaded: boolean;
+  inFlight: Promise<boolean> | undefined;
+  /** An explicit `loadPrevious` is awaiting — what the lens reports as `isLoadingPrevious`. */
+  loading: boolean;
+}
+
+const toThreadNode = (wire: ThreadNodeWire): ThreadNode => ({
+  id: wire.id,
+  ...(wire.parentThreadId !== undefined ? { parentThreadId: wire.parentThreadId } : {}),
+  rootThreadId: wire.rootThreadId,
+  depth: wire.depth,
+  spawnedBy: { id: wire.spawnedBy.id },
+  messageCount: wire.threadSeq,
+  createdAt: wire.createdAt,
+});
+
+const threadOnEphemeralLane = (type: string | undefined): NotYetSupportedError =>
+  new NotYetSupportedError(
+    `A send of type "${type ?? "message"}" travels as an ephemeral frame and cannot be addressed to a thread.`,
+  );
+
+const validationMessage = (reason: string | undefined): string =>
+
+  reason === "thread_depth_exceeded"
+    ? "The reply would nest deeper than this channel allows."
+    : "The message failed validation.";
+
+const exhaustedThreadPage = (): ThreadPage => ({
+
+  threads: [],
+  hasMore: false,
+  next: () => Promise.resolve(exhaustedThreadPage()),
+});
+
+
 /**
  * Owns one channel's socket lifecycle and its message plane: connect, `ready` ingestion,
  * ordering/dedup/gap-fill, retraction, optimistic send + ack, history paging, refusal
@@ -95,6 +144,9 @@ export class ChannelConnection {
   #socket: Socket | undefined;
   #http: HttpClient | undefined;
   #disposed = false;
+  /** Bumped on every `connect()`; a request that started in an earlier session lands nowhere. */
+  #session = 0;
+
 
   /** Sticky reconnect hint from the last `ready`; echoed on the next upgrade. */
   #leaf: string | undefined;
@@ -121,8 +173,11 @@ export class ChannelConnection {
   >();
   /** Last send time per activity kind, for client-side throttling. */
   readonly #activityThrottle = new Map<string, number>();
+  /** Session state per thread lens, keyed by thread id. Survives teardown minus the session bits. */
+  readonly #threads = new Map<string, ThreadState>();
 
   constructor(deps: ConnectionDeps) {
+
     this.#deps = deps;
     this.#buffer = new MessageBuffer(deps.channelId);
     this.#metadata = deps.metadata;
@@ -133,10 +188,18 @@ export class ChannelConnection {
   connect(): void {
     if (this.#socket !== undefined) return;
     this.#disposed = false;
+    this.#session++;
     this.#tokenRetryUsed = false;
     this.#setStatus("connecting");
+
     this.#socket = getSocketFactory()({ url: this.#buildUrl, onEvent: this.#onEvent });
     if (this.#deps.history !== "none") this.#backfill(this.#deps.history);
+    // A thread lens that stayed subscribed across a teardown starts its session over, exactly
+    // like the channel's own backfill.
+    for (const [threadId, state] of this.#threads) {
+      if (state.subscribers > 0) this.#ensureThreadLoaded(threadId);
+    }
+
     // Anonymous mode: the SDK owns the credential, so a mint failure has no other way to
     // surface. Resolve eagerly and turn a failure into a terminal error. Fire-and-forget;
     // on success the token is cached and the socket's own url() reuses it (one mint).
@@ -165,7 +228,13 @@ export class ChannelConnection {
     this.#loadingPrevious = false;
     this.#loadPreviousInFlight = undefined;
     this.#inflightGaps.clear();
+    for (const state of this.#threads.values()) {
+      state.loaded = false;
+      state.inFlight = undefined;
+      state.loading = false;
+    }
     this.#keepalive.stop();
+
     this.#clearActivity();
     this.#activityThrottle.clear();
     this.#buffer.reset();
@@ -287,6 +356,13 @@ export class ChannelConnection {
 
   #deliver(msgs: readonly WireMessage[]): void {
     const { delivered, gaps } = this.#buffer.ingest(msgs);
+    this.#announce(delivered);
+    this.#publishState();
+    this.#scheduleGapFills(gaps);
+  }
+
+  /** Fire `message` (and `mention`, when addressed to me) for newly arrived messages. */
+  #announce(delivered: readonly Message[]): void {
     const meId = this.store.getSnapshot().me?.id;
     for (const msg of delivered) {
       this.events.emit("message", msg);
@@ -294,9 +370,8 @@ export class ChannelConnection {
         this.events.emit("mention", msg);
       }
     }
-    this.#publishState();
-    this.#scheduleGapFills(gaps);
   }
+
 
   #onRetract(id: string, seq: number): void {
     this.#buffer.retract(seq);
@@ -335,22 +410,38 @@ export class ChannelConnection {
   // ── Sending ───────────────────────────────────────────────
 
   send(input: SendInput<unknown>): Promise<SendAck> {
+    // A thread reply is persistent by definition: the ephemeral lane has no thread field, so
+    // anything that would travel on it is refused outright rather than losing its thread —
+    // and an explicitly ephemeral send carrying a thread id is refused before routing, so no
+    // transport binding can turn that contradiction into a persistent reply.
+    const threadParentId = (input as { threadParentId?: string }).threadParentId;
+    if (input.ephemeral === true && threadParentId !== undefined) {
+      return Promise.reject(threadOnEphemeralLane(input.type));
+    }
     const route = this.#extensionRoute(input.type);
+
     if (route !== undefined) {
       if (this.#degraded.has(route.namespace)) {
         return Promise.reject(
           new DegradedError(`The "${route.namespace}" extension is degraded.`),
         );
       }
-      return route.transport === "ws"
-        ? this.#sendEphemeralFrame(input.type, input.content)
-        : this.#publishOnce(input);
+      if (route.transport === "ws") {
+        if (threadParentId !== undefined) return Promise.reject(threadOnEphemeralLane(input.type));
+        return this.#sendEphemeralFrame(input.type, input.content);
+      }
+      // HTTP-routed extension sends publish with `threadParentId` in the body and, as for
+      // every extension publish, without an optimistic insert; the reply reaches the thread
+      // lens through the channel.
+      return this.#publishOnce(input);
     }
     if (input.ephemeral === true) {
       return this.#sendEphemeralFrame(input.type, input.content);
     }
     return this.#sendPersistent(input);
+
   }
+
 
   async #sendPersistent(input: SendInput<unknown>): Promise<SendAck> {
     const tempId = this.#nextTag();
@@ -361,8 +452,10 @@ export class ChannelConnection {
       content: input.content,
       to: persistent.to,
       mentions: persistent.mentions,
+      threadParentId: persistent.threadParentId,
       timestamp: Date.now(),
     });
+
     this.#publishState();
 
     let outcome;
@@ -494,7 +587,191 @@ export class ChannelConnection {
     return promise;
   }
 
+  // ── Threads ───────────────────────────────────────────────
+
+  #thread(threadId: string): ThreadState {
+    let state = this.#threads.get(threadId);
+    if (state === undefined) {
+      state = { subscribers: 0, loaded: false, inFlight: undefined, loading: false };
+      this.#threads.set(threadId, state);
+    }
+    return state;
+  }
+
+  /** One thread's replies, in order, own unacked replies appended. */
+  threadMessages(threadId: string): Message[] {
+    return this.#buffer.threadMessages(threadId);
+  }
+
+  threadHasPrevious(threadId: string): boolean {
+    return this.#buffer.threadHasPrevious(threadId);
+  }
+
+  threadIsLoadingPrevious(threadId: string): boolean {
+    return this.#threads.get(threadId)?.loading ?? false;
+  }
+
+  /**
+   * A lens subscription: the channel store notifies it, and the first one this session
+   * triggers the thread's initial page. The count is what a reconnect consults.
+   */
+  subscribeThread(threadId: string, listener: () => void): Unsubscribe {
+    return this.#holdThread(threadId, this.store.subscribe(listener));
+  }
+
+  /**
+   * Count a lens listener (store subscription or event listener alike) as holding the
+   * thread, so a reconnect after a teardown re-fetches it, and release it exactly once.
+   */
+  #holdThread(threadId: string, off: Unsubscribe): Unsubscribe {
+    const state = this.#thread(threadId);
+    state.subscribers++;
+    this.#ensureThreadLoaded(threadId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      state.subscribers--;
+      off();
+    };
+  }
+
+  /**
+   * Thread-scoped events: `message`/`mention`/`retract` narrowed; the rest are the channel's.
+   * An event listener holds the thread exactly as a store subscription does.
+   */
+  onThread<E extends keyof ChannelEvents<unknown>>(
+    threadId: string,
+    event: E,
+    fn: ChannelEvents<unknown>[E],
+  ): Unsubscribe {
+    return this.#holdThread(threadId, this.#onThreadEvent(threadId, event, fn));
+  }
+
+  #onThreadEvent<E extends keyof ChannelEvents<unknown>>(
+    threadId: string,
+    event: E,
+    fn: ChannelEvents<unknown>[E],
+  ): Unsubscribe {
+    switch (event) {
+
+      case "message": {
+        const handler = fn as ChannelEvents<unknown>["message"];
+        return this.events.on("message", (msg: Message) => {
+          if (msg.threadParentId === threadId) handler(msg);
+        });
+      }
+      case "mention": {
+        const handler = fn as ChannelEvents<unknown>["mention"];
+        return this.events.on("mention", (msg: Message) => {
+          if (msg.threadParentId === threadId) handler(msg);
+        });
+      }
+      case "retract": {
+
+        const handler = fn as ChannelEvents<unknown>["retract"];
+        return this.events.on("retract", (messageId: string) => {
+          if (this.#buffer.threadOf(messageId) === threadId) handler(messageId);
+        });
+      }
+      default:
+        return this.events.on(event, fn);
+    }
+  }
+
+  /** Older replies in one thread; see {@link ThreadHandle.loadPrevious}. */
+  loadThreadPrevious(threadId: string): Promise<boolean> {
+    const state = this.#thread(threadId);
+    if (state.inFlight !== undefined) {
+      if (!state.loading) {
+        state.loading = true;
+        this.#publishState();
+      }
+      return state.inFlight;
+    }
+    if (state.loaded && !this.#buffer.threadHasPrevious(threadId)) return Promise.resolve(false);
+    return this.#fetchThread(threadId, true);
+  }
+
+  /** The thread registry — one page, with keyset `next()`. */
+  threads(query: ThreadsQuery | undefined): Promise<ThreadPage> {
+    return this.#threadPage(query, undefined);
+  }
+
+  #ensureThreadLoaded(threadId: string): void {
+    const state = this.#thread(threadId);
+    // Nothing to fetch against until the session exists; `connect()` picks subscribed threads up.
+    if (state.loaded || this.#socket === undefined) return;
+    this.#fetchThread(threadId, false).catch(() => {
+      // Like the channel's own backfill: a failed initial page is retried by the next
+      // subscription or `loadPrevious`, and there is nothing to surface meanwhile.
+    });
+  }
+
+  /**
+   * Fetch the page before the oldest reply held for a thread — or, holding none, the latest
+   * page (the lazy initial fetch). `explicit` marks a caller-driven `loadPrevious`, which is
+   * what the lens reports as loading; the automatic initial page is not.
+   */
+  #fetchThread(threadId: string, explicit: boolean): Promise<boolean> {
+    const state = this.#thread(threadId);
+    state.loaded = true;
+    if (explicit) state.loading = true;
+    const pageSize = this.#deps.history === "none" ? 50 : this.#deps.history;
+    const before = this.#buffer.lowestThreadSeq(threadId);
+    const session = this.#session;
+    // Still the live request for this session — a teardown or a reconnect in the meantime
+    // hands the thread to a new request, and this one must then touch nothing.
+    const current = (): boolean =>
+      !this.#disposed && session === this.#session && state.inFlight === promise;
+
+    const promise: Promise<boolean> = (async (): Promise<boolean> => {
+      try {
+        const page = await this.#httpClient().history(this.#deps.channelId, {
+          threadParentId: threadId,
+          ...(before !== undefined ? { before } : {}),
+          limit: pageSize,
+        });
+        if (!current()) return false;
+        this.#announce(this.#buffer.ingestThreadHistory(page.msgs));
+        this.#buffer.setThreadHasPrevious(threadId, page.hasMore);
+        return page.hasMore;
+      } catch (cause) {
+        if (current()) state.loaded = false;
+        throw cause;
+      } finally {
+        if (current()) {
+          state.loading = false;
+          state.inFlight = undefined;
+          this.#publishState();
+        }
+      }
+    })();
+
+    state.inFlight = promise;
+    if (explicit) this.#publishState();
+    return promise;
+  }
+
+  async #threadPage(query: ThreadsQuery | undefined, before: number | undefined): Promise<ThreadPage> {
+    const page = await this.#httpClient().threads(this.#deps.channelId, {
+      ...(query?.root !== undefined ? { root: query.root } : { parent: query?.parent ?? "" }),
+      ...(before !== undefined ? { before } : {}),
+      ...(query?.limit !== undefined ? { limit: query.limit } : {}),
+    });
+    const last = page.threads.at(-1);
+    return {
+      threads: page.threads.map(toThreadNode),
+      hasMore: page.hasMore,
+      next: () =>
+        page.hasMore && last !== undefined
+          ? this.#threadPage(query, last.spawnSeq)
+          : Promise.resolve(exhaustedThreadPage()),
+    };
+  }
+
   #backfill(limit: number): void {
+
     void this.#httpClient()
       .history(this.#deps.channelId, { limit })
       .then((page) => {
@@ -556,6 +833,9 @@ export class ChannelConnection {
       ...(persistent.kind !== undefined ? { kind: persistent.kind } : {}),
       ...(persistent.to !== undefined ? { to: persistent.to } : {}),
       ...(persistent.mentions !== undefined ? { mentions: persistent.mentions } : {}),
+      ...(persistent.threadParentId !== undefined
+        ? { threadParentId: persistent.threadParentId }
+        : {}),
     };
   }
 
@@ -563,8 +843,14 @@ export class ChannelConnection {
     if (code === "blocked_by_middleware") {
       return new BlockedError(reason ?? "The message was blocked.");
     }
+    if (code === "validation_failed") {
+      // `reason` is a machine-readable token here (e.g. `thread_depth_exceeded`), so the
+      // human copy is derived rather than echoed.
+      return new BlockedError(reason ?? "validation_failed", validationMessage(reason));
+    }
     return new PortalError(code, reason ?? "The message was rejected.");
   }
+
 
   #inSessionError(code: string, reason?: string): PortalError {
     if (code === "blocked_by_middleware") {
