@@ -1,4 +1,4 @@
-# The published copy lives at the portalsdk repo docs-site/openapi/openapi.yaml; copy on every change to this file (manual sync).
+# The published copy at useportal/portal-sdk docs-site/openapi/openapi.yaml is synced automatically by .github/workflows/sync-openapi.yml on push to main — do not copy by hand.
 # Scalar's build fails entirely on any nav-referenced missing file.
 openapi: 3.1.0
 info:
@@ -80,8 +80,6 @@ tags:
     description: Upload and activate channel configuration.
   - name: Secrets
     description: Manage runtime secret values for your deployed config.
-  - name: Webhooks
-    description: Inspect webhook delivery and retrieve the per-environment signing secret.
   - name: Dashboard
     description: Dashboard-session routes (Clerk), surfaced for integrators where useful.
   - name: CLI Authentication
@@ -361,6 +359,12 @@ paths:
         (up to 100 members per request). `claims` is an optional display snapshot
         (for example `username`, `avatar`) recorded at add time; a row otherwise
         fills in when the user first connects.
+
+        `claims` is a display snapshot, **not** permissions — a session's
+        capabilities come from the `authz` callback's `allow(capabilities)`
+        verdict at connect, and nothing here grants them. Unknown fields
+        (`capabilities` among them) are rejected with `validation_failed` rather
+        than silently ignored.
       security:
         - secretKey: []
       parameters:
@@ -409,7 +413,10 @@ paths:
       operationId: listChannelMembers
       tags: [Channels — Client]
       servers:
+        - url: https://api.useportal.co
+          description: Server roster read — secret key.
         - url: https://realtime.useportal.co
+          description: Client roster read — user JWT.
       summary: List channel members
       description: |
         Returns the member directory of a **standard** channel, with each member's
@@ -417,11 +424,14 @@ paths:
         live presence updates — subscribe to the channel WebSocket for live joins
         and leaves. Keyset-paged by `cursor`; `cursor` is absent on the last page.
 
-        Broadcast channels have no membership concept and return `404
-        not_membership_channel`. Browser CORS is enabled for this route, scoped to
-        the environment's allowed origins. `limit` defaults to 100 and is capped at
-        500.
+        The same endpoint serves both callers: use the control plane with a
+        **secret key** for server-side roster reads, or the realtime edge with a
+        **user JWT** for client reads. Broadcast channels have no membership concept
+        and return `404 not_membership_channel`. Browser CORS is enabled on the
+        realtime edge, scoped to the environment's allowed origins. `limit`
+        defaults to 100 and is capped at 500.
       security:
+        - secretKey: []
         - userToken: []
       parameters:
         - $ref: "#/components/parameters/ChannelId"
@@ -460,6 +470,138 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotMembershipChannel" }
+
+  /v1/channels/{channelId}/threads:
+    get:
+      operationId: listChannelThreads
+      tags: [Channels — Client]
+      servers:
+        - url: https://api.useportal.co
+          description: Server registry read — secret key.
+        - url: https://realtime.useportal.co
+          description: Client registry read — user JWT.
+      summary: List a channel's threads
+      description: |
+        Enumerates the channel's **session registry** — one node per thread,
+        whether or not the caller participates in it. A thread's id is the id of
+        the message that started it; since threads nest, that message may itself
+        be a thread reply. Pick exactly one filter:
+
+        * `parent={threadId}` — the direct children of that thread.
+          `parent=` (empty) lists the **root** threads; omitting both filters
+          does the same.
+        * `root={threadId}` — every thread in that branch, at any depth.
+
+        Nodes come back newest-spawned first (`spawnSeq` desc, id asc),
+        keyset-paged by the opaque `cursor` request param; the next page's
+        cursor comes back as `nextCursor`, absent on the last page. `limit`
+        defaults to 50; the valid range is 1–100.
+
+        This is enumeration, not the inbox: a caller's own participant list,
+        with unread counts and read positions, is the inbox's. The same endpoint
+        serves both callers: use the control plane with a **secret key** for
+        server-side reads, or the realtime edge with a **user JWT** for client
+        reads, which are admitted exactly like `history`. Browser CORS is
+        enabled on the realtime edge, scoped to the environment's allowed
+        origins.
+
+        **The two hosts handle a malformed query differently — except `cursor`,
+        which both hosts refuse identically because it is validated once, at the
+        shared coordinator.** A malformed `cursor` (not the exact
+        `{spawnSeq}:{threadId}` shape) is `400 validation_failed` with
+        `reason: invalid_cursor` on both hosts; an absent `cursor` is always the
+        first page. For `parent`/`root`/`limit`, the control plane refuses a bad
+        query: `parent` and `root` together is `400 validation_failed` with
+        `reason: parent_and_root_exclusive`, and a `limit` that is not an
+        integer in 1–100 is `400 validation_failed`. The realtime edge does not
+        validate those: a non-empty `root` takes precedence over `parent`, and a
+        malformed or out-of-range `limit` is normalised (non-numeric or `≤ 0`
+        falls back to 50, above 100 is capped at 100). Send a well-formed query
+        and both hosts behave identically.
+      security:
+        - secretKey: []
+        - userToken: []
+      parameters:
+        - $ref: "#/components/parameters/ChannelId"
+        - name: parent
+          in: query
+          required: false
+          schema: { type: string }
+          description: List the direct children of this thread. Empty (`parent=`) lists the root threads. Exclusive with `root` — the control plane refuses both together; the realtime edge lets a non-empty `root` win.
+          example: m_1752912000_41
+        - name: root
+          in: query
+          required: false
+          schema: { type: string }
+          description: List every thread in this branch, at any depth. Exclusive with `parent` — the control plane refuses both together; the realtime edge lets a non-empty `root` win.
+          example: m_1752912000_41
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: >-
+            Opaque keyset cursor, from the previous page's `nextCursor`. Absent
+            = first page. A present but malformed value is `400
+            validation_failed` (`reason: invalid_cursor`) on both hosts.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+          description: Page size (default 50, max 100). Outside 1–100 or not an integer, the control plane answers `validation_failed`; the realtime edge normalises it (see the description).
+          example: 50
+      responses:
+        "200":
+          description: A page of thread nodes and whether more are available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreadsResponse"
+              examples:
+                default:
+                  summary: A root thread and one of its sub-threads, more available
+                  value:
+                    threads:
+                      - id: m_1752912100_45
+                        parentThreadId: m_1752912000_41
+                        rootThreadId: m_1752912000_41
+                        depth: 2
+                        spawnSeq: 45
+                        spawnedBy:
+                          id: u_456
+                        latestSeq: 52
+                        threadSeq: 1
+                        createdAt: 1752912099000
+                      - id: m_1752912000_41
+                        rootThreadId: m_1752912000_41
+                        depth: 1
+                        spawnSeq: 41
+                        spawnedBy:
+                          id: u_123
+                        latestSeq: 58
+                        threadSeq: 3
+                        createdAt: 1752911999000
+                    hasMore: true
+                    nextCursor: "41:m_1752912000_41"
+        "400":
+          description: The query failed validation. `parent`/`root`/`limit` errors are control-plane only (the realtime edge normalises instead of refusing); a malformed `cursor` is refused identically on both hosts. `reason` describes the problem.
+          headers:
+            x-portal-error: { $ref: "#/components/headers/XPortalError" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                parentAndRoot:
+                  summary: Both filters were sent (control plane only)
+                  value: { code: validation_failed, reason: parent_and_root_exclusive }
+                limit:
+                  summary: limit out of range or not an integer (control plane only)
+                  value: { code: validation_failed, reason: limit must be an integer between 1 and 100 }
+                invalidCursor:
+                  summary: cursor was present but not the exact `{spawnSeq}:{threadId}` shape (both hosts)
+                  value: { code: validation_failed, reason: invalid_cursor }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /v1/channels/{channelId}/members/{userId}:
     delete:
@@ -632,7 +774,8 @@ paths:
         `extract` is the declarative configuration (see the schema). `hookScript`
         and `extensionScripts` carry the bundled code your config references, if
         any. Re-uploading identical content returns `409 version_exists` — treat it
-        as success client-side (the existing `versionId` is stable).
+        as success client-side: that response carries the existing `versionId`
+        (the id is stable), so activate it the same way you would a new one.
       security:
         - secretKey: []
       requestBody:
@@ -643,12 +786,13 @@ paths:
               $ref: "#/components/schemas/DeployRequest"
             examples:
               default:
-                summary: A minimal config with one standard channel
+                summary: A minimal config with one standard channel and webhook relay
                 value:
                   extract:
                     version: "1"
                     project:
-                      webhooks: null
+                      webhooks:
+                        url: https://hooks.example.com/portal
                     channels:
                       chat-general:
                         mode: standard
@@ -779,7 +923,8 @@ paths:
                     extract:
                       version: "1"
                       project:
-                        webhooks: null
+                        webhooks:
+                          url: https://hooks.example.com/portal
                       channels:
                         chat-general:
                           mode: standard
@@ -1379,7 +1524,10 @@ paths:
       operationId: getChannelHistory
       tags: [Channels — Client]
       servers:
+        - url: https://api.useportal.co
+          description: Server history read — secret key.
         - url: https://realtime.useportal.co
+          description: Client history read — user JWT.
       summary: Read message history
       description: |
         Returns message history for a channel. One endpoint serves two paging
@@ -1391,10 +1539,14 @@ paths:
         * **Gap-fill range** — `?from={seq}&to={seq}`. Returns messages in the
           inclusive `[from, to]` sequence range, ascending.
 
-        The response is `{ msgs, hasMore }`. Retracted messages come back as
-        tombstoned envelopes (`retracted: true`, `content: null`). Browser CORS is
-        enabled for this route, scoped to the environment's allowed origins.
+        The same endpoint serves both callers: use the control plane with a
+        **secret key** for server-side history reads, or the realtime edge with a
+        **user JWT** for client reads. The response is `{ msgs, hasMore }`.
+        Retracted messages come back as tombstoned envelopes (`retracted: true`,
+        `content: null`). Browser CORS is enabled on the realtime edge, scoped to
+        the environment's allowed origins.
       security:
+        - secretKey: []
         - userToken: []
       parameters:
         - $ref: "#/components/parameters/ChannelId"
@@ -1416,6 +1568,25 @@ paths:
           schema: { type: integer, minimum: 0 }
           description: Inclusive upper bound of a gap-fill range (use with `from`).
           example: 120
+        - name: threadParentId
+          in: query
+          required: false
+          schema: { type: string, maxLength: 128 }
+          description: |
+            Scope the read to ONE thread: the id of the message that started it.
+            Returns only that thread's replies, paged by `threadSeq` — inside a
+            thread, `before` is a thread position, not a channel `seq`.
+
+            Unscoped history still contains thread replies (every message is
+            stored in the channel); this narrows the read for clients that want
+            a thread on its own.
+
+            Honored by both servers: the realtime edge pages the coordinator's
+            hot tier and falls through to the Postgres archive; the control
+            plane reads the archive directly. Messages archived before the
+            thread columns existed are untagged and not returned by a
+            thread-scoped read. See amendments A17 and A19.
+          example: m_1752912000_42
         - name: limit
           in: query
           required: false
@@ -1641,17 +1812,22 @@ components:
                 reason: userId is required
 
     VersionExists:
-      description: Identical config content was already uploaded. Treat as success — the existing `versionId` is stable.
+      description: |
+        Identical config content was already uploaded. Treat as success: the response
+        carries the existing `versionId`, which you activate exactly as you would a
+        newly-uploaded one. The id is stable — identical content always yields the
+        same one.
       headers:
         x-portal-error: { $ref: "#/components/headers/XPortalError" }
       content:
         application/json:
-          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          schema: { $ref: "#/components/schemas/VersionExistsEnvelope" }
           examples:
             default:
               value:
                 code: version_exists
                 reason: identical config already deployed
+                versionId: cfg_3f1a9b2c8d4e6f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a
 
     RateLimited:
       description: Rate limited. Retry after the indicated interval.
@@ -1735,6 +1911,25 @@ components:
         reason:
           type: string
           description: A human-readable explanation. Absent when the code is self-explanatory.
+      additionalProperties: false
+
+    VersionExistsEnvelope:
+      type: object
+      description: |
+        The `version_exists` refusal from `POST /v1/deploys`. It is an error
+        envelope plus the `versionId` that already holds this exact content, so a
+        redeploy of unchanged configuration can activate that version rather than
+        stopping.
+      required: [code, versionId]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        reason:
+          type: string
+          description: A human-readable explanation.
+        versionId:
+          type: string
+          description: The content-addressed id (`cfg_...`) of the version that already holds this content.
       additionalProperties: false
 
     Empty:
@@ -1904,6 +2099,27 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Mention" }
           description: Declared mentions. The platform verifies each is a member, dedupes, and caps the count.
+        threadParentId:
+          type: string
+          maxLength: 128
+          description: |
+            Reply into a thread: the id of the message that started it — that id
+            IS the thread id. The reply is stored in the channel and delivered
+            live to every channel connection like any other message; what
+            narrows is notification, which goes only to the thread's
+            participants (users who posted in or were mentioned in it).
+
+            The parent is not required to still be resident in the channel's hot
+            storage. Mutually exclusive with `to` — sending both is rejected
+            `validation_failed`.
+
+            Threads nest, to a cap of 8 levels: a reply whose thread would sit
+            deeper is rejected `validation_failed` with
+            `reason: thread_depth_exceeded`. A `threadParentId` naming a message
+            the channel cannot have minted yet is rejected `validation_failed`
+            with `reason: thread_parent_unknown` — an id whose message has
+            merely aged out is still accepted, and its thread is recorded as
+            top-level when the ancestry can no longer be resolved.
       additionalProperties: false
 
     ClientPublishRequest:
@@ -1931,6 +2147,27 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Mention" }
           description: Declared mentions. The platform verifies each is a member, dedupes, and caps the count.
+        threadParentId:
+          type: string
+          maxLength: 128
+          description: |
+            Reply into a thread: the id of the message that started it — that id
+            IS the thread id. The reply is stored in the channel and delivered
+            live to every channel connection like any other message; what
+            narrows is notification, which goes only to the thread's
+            participants (users who posted in or were mentioned in it).
+
+            The parent is not required to still be resident in the channel's hot
+            storage. Mutually exclusive with `to` — sending both is rejected
+            `validation_failed`.
+
+            Threads nest, to a cap of 8 levels: a reply whose thread would sit
+            deeper is rejected `validation_failed` with
+            `reason: thread_depth_exceeded`. A `threadParentId` naming a message
+            the channel cannot have minted yet is rejected `validation_failed`
+            with `reason: thread_parent_unknown` — an id whose message has
+            merely aged out is still accepted, and its thread is recorded as
+            top-level when the ancestry can no longer be resolved.
       additionalProperties: false
 
     SendAck:
@@ -1996,6 +2233,17 @@ components:
         mentions:
           type: array
           items: { $ref: "#/components/schemas/Mention" }
+        threadParentId:
+          type: string
+          description: |
+            Present on thread replies: the id of the message that started the
+            thread — that id IS the thread id.
+        threadSeq:
+          type: integer
+          description: |
+            Present on thread replies: dense position within the thread's OWN
+            sequence space, independent of the channel's `seq` and of sibling
+            threads. Per-thread unread is derived from this, not from `seq`.
         retracted:
           type: boolean
           description: Whether the message was retracted after publish.
@@ -2043,6 +2291,63 @@ components:
         cursor:
           type: string
           description: Keyset cursor for the next page; absent on the last page.
+      additionalProperties: false
+
+    ThreadNode:
+      type: object
+      description: |
+        One thread in a channel's session registry (wire protocol §3.4). Mirrors
+        `ThreadNodeWire` in the api's `src/types.ts`.
+      required: [id, rootThreadId, depth, spawnSeq, latestSeq, threadSeq, createdAt]
+      properties:
+        id:
+          type: string
+          description: The thread id — the id of the message that started it.
+        parentThreadId:
+          type: string
+          description: The enclosing thread's id. Absent on a root thread.
+        rootThreadId:
+          type: string
+          description: The top of the chain. A root thread's is itself.
+        depth:
+          type: integer
+          minimum: 1
+          maximum: 8
+          description: Root threads are depth 1. Replies that would sit deeper than 8 are refused at publish (`thread_depth_exceeded`).
+        spawnSeq:
+          type: integer
+          description: Channel `seq` of the message that started the thread.
+        spawnedBy:
+          type: object
+          description: Author of the spawn message. Absent when that message was evicted before the registry saw it.
+          required: [id]
+          properties:
+            id:
+              type: string
+          additionalProperties: false
+        latestSeq:
+          type: integer
+          description: Channel `seq` of the thread's most recent message.
+        threadSeq:
+          type: integer
+          description: The thread's own dense counter — its message count.
+        createdAt:
+          type: integer
+          description: Epoch milliseconds (coordinator clock).
+      additionalProperties: false
+
+    ThreadsResponse:
+      type: object
+      required: [threads, hasMore]
+      properties:
+        threads:
+          type: array
+          items: { $ref: "#/components/schemas/ThreadNode" }
+        hasMore:
+          type: boolean
+        nextCursor:
+          type: string
+          description: Opaque keyset cursor for the next page; absent on the last page.
       additionalProperties: false
 
     AddMemberSingle:
@@ -2173,16 +2478,55 @@ components:
     ProjectAuthConfig:
       type: object
       required: [issuer, jwksUrl, claimMap]
-      description: Optional external JWT verification (bring-your-own-JWT).
+      description: >-
+        Bring-your-own-JWT verification. When present, the realtime edge verifies
+        end-user tokens signed by this issuer against its JWKS, and the environment
+        stops accepting Portal-minted tokens entirely — the block is a switch, not
+        an addition. Accepted signing algorithms are `RS256`, `RS512`, and `ES256`
+        (RSA moduli must be at least 2048 bits); symmetric algorithms cannot be
+        used, since Portal never holds the signing key. Tokens must carry `exp`.
+        Clients must also present their publishable key (`pk_`) on the connection,
+        as that is what identifies which environment's issuer to verify against.
       properties:
         issuer:
           type: string
+          description: >-
+            The expected `iss` claim. Tokens from any other issuer are refused.
         jwksUrl:
           type: string
+          format: uri
+          description: >-
+            The issuer's JSON Web Key Set. Must use `https` and resolve to a public
+            host — private, internal, and loopback addresses are rejected at deploy
+            time, and unlike the webhook URL there is no `localhost` exception,
+            because the edge fetches this from Portal's own egress. Cached for ten
+            minutes, refetched on an unrecognised `kid` so key rotation needs no
+            deploy.
         claimMap:
           type: object
-          description: Maps external claims to Portal claims.
+          description: >-
+            Maps claim paths in your token (dot-notation, e.g. `public_metadata.role`)
+            onto Portal identity fields. `userId` is REQUIRED and becomes the Portal
+            user id; the optional `anon` marks the session anonymous when its claim is
+            explicitly true; every other entry becomes a session claim of the same
+            name, readable from `ctx.claims` in `authz` and middleware.
+          required: [userId]
           additionalProperties: { type: string }
+      additionalProperties: false
+
+    WebhookRelayConfig:
+      type: object
+      required: [url]
+      description: Webhook relay endpoint for a project. Portal POSTs a signed payload here for every channel message.
+      properties:
+        url:
+          type: string
+          format: uri
+          description: >-
+            The endpoint Portal POSTs channel-message events to. Must use `https`
+            and resolve to a public host — private, internal, and loopback
+            addresses are rejected at deploy time. (`http` is permitted only for
+            `localhost` during local development.)
       additionalProperties: false
 
     ConfigExtract:
@@ -2204,14 +2548,12 @@ components:
               description: Optional external auth config. `null` uses Portal-minted JWTs.
             webhooks:
               oneOf:
-                - $ref: "#/components/schemas/WebhookConfig"
+                - $ref: "#/components/schemas/WebhookRelayConfig"
                 - type: "null"
-              description: |
-                Webhook delivery configuration set via the `webhooks` field of
-                `portal.config.ts`. When set, Portal relays `message.published` and
-                `message.retracted` events for every channel to the given endpoint,
-                signed with a per-environment secret (see `GET /v1/webhooks/secret`).
-                `null` (the default) disables webhook delivery.
+              description: >-
+                Webhook relay endpoint for this project, or `null` when disabled.
+                When set, Portal delivers a signed POST for every channel message
+                to `url`. One endpoint per project.
           additionalProperties: false
         channels:
           type: object
@@ -2346,25 +2688,6 @@ components:
           type: array
           items: { $ref: "#/components/schemas/SecretRow" }
           description: Secret names and timestamps. Never values.
-      additionalProperties: false
-
-    WebhookConfig:
-      type: object
-      required: [url]
-      description: |
-        Webhook delivery configuration, set via the `webhooks` field of
-        `portal.config.ts` (`@portalsdk/config`'s `WebhookConfig` type). One
-        endpoint per project.
-      properties:
-        url:
-          type: string
-          description: |
-            The endpoint Portal POSTs signed webhook events to. Must use
-            `https` (or `http`, only for `localhost` / `127.0.0.1` / `[::1]`,
-            for local development) and must not resolve to a private or
-            internal address (RFC1918 ranges, link-local, loopback, an
-            `.internal`/`.localhost` TLD, or their IPv6 equivalents) —
-            `portal deploy` rejects the config otherwise.
       additionalProperties: false
 
     WebhookDelivery:

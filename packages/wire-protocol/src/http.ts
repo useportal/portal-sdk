@@ -68,7 +68,7 @@ export type ThreadNodeWire = {
   parentThreadId?: string;
   /** The top-level ancestor; equals `id` on a root thread. */
   rootThreadId: string;
-  /** Nesting level; a root thread is depth `0`. */
+  /** Nesting level. A root thread is depth `1`; the platform's cap is `8`. */
   depth: number;
   /** Channel `seq` of the message this thread hangs off. */
   spawnSeq: number;

@@ -35,6 +35,11 @@
                 "title": "Channels",
                 "filepath": "docs/core/channels.md"
               },
+              "/threads": {
+                "type": "page",
+                "title": "Threads",
+                "filepath": "docs/core/threads.md"
+              },
               "/inbox": {
                 "type": "page",
                 "title": "Inbox",
@@ -70,6 +75,11 @@
                 "type": "page",
                 "title": "useChannel",
                 "filepath": "docs/react/use-channel.md"
+              },
+              "/use-thread": {
+                "type": "page",
+                "title": "useThread",
+                "filepath": "docs/react/use-thread.md"
               },
               "/use-inbox": {
                 "type": "page",

@@ -58,6 +58,33 @@ entry?.unmute();
 (`room.markAsRead()` from [Channels](/core/channels)) — the inbox tracks *noticing*, the
 channel tracks *reading*, and the two are allowed to disagree.
 
+#### Thread entries
+
+A thread you participate in gets its own entry, **beside** its channel's rather than
+inside it — same `id`, its own `unread`, `latest`, read position and `muted`. Identity is
+the pair `(id, threadId)`:
+
+```ts
+import { Portal } from "@portalsdk/core";
+
+const portal = new Portal({ apiKey: "pk_your_publishable_key" });
+const inbox = portal.inbox();
+
+const channelEntry = inbox.channels.get("room-1"); // the channel's own entry, never a thread's
+const threadEntry = inbox.channels.get("room-1", "msg_the_parent_id");
+
+threadEntry?.parentThreadId; // the enclosing thread, on a nested thread
+threadEntry?.rootThreadId; // the top of the branch
+threadEntry?.markAsRead(); // this thread only
+
+console.log(channelEntry?.unread, threadEntry?.unread);
+```
+
+No entry's state ever reflects another's traffic — a reply in a sub-thread doesn't touch
+its parent's unread, or the channel's. `parentThreadId` / `rootThreadId` are there so you
+can nest the sidebar or aggregate a branch yourself; the SDK aggregates nothing. See
+[Threads](/core/threads).
+
 ### Items
 
 ```ts
