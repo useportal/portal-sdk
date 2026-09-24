@@ -99,8 +99,8 @@ follows."
 Every message on the wire — persistent or ephemeral — shares one envelope shape: `id`,
 `seq` (`null` for ephemeral messages, which have no ordering guarantee), `type`, `kind`,
 opaque `content` (≤2KB), `sender` (`{ id, anon, username? }` — `username` only on
-broadcast channels), `timestamp`, optional `to`/`mentions`, and `retracted`/`ephemeral`
-flags. This is exactly the shape `Message<M>` in `@portalsdk/core` is built from.
+broadcast channels), `timestamp`, optional `to`/`mentions`, optional
+`threadParentId`/`threadSeq` on a thread reply, and `retracted`/`ephemeral` flags. This is exactly the shape `Message<M>` in `@portalsdk/core` is built from.
 
 **Client → server** (persistent publishes go over HTTP, not the socket — see below):
 
@@ -119,21 +119,36 @@ flags. This is exactly the shape `Message<M>` in `@portalsdk/core` is built from
 The same admission gates that apply to HTTP publishes apply here; a refusal comes back
 as an `error` frame, using `ref` to identify which upstream frame it refers to.
 
+There is no thread lane on the socket. A reply is delivered in the ordinary `batch`
+frames to every connection, carrying `threadParentId`; only *notification* narrows to the
+thread's participants. Grouping replies into threads is the client's job — which is what
+`ChannelHandle.thread()` does over the buffer it already holds.
+
 ## HTTP surface
 
 Three endpoints, all authenticated with `authorization: Bearer {jwt}`:
 
 - **Publish** — `POST /v1/channels/{channelId}/messages` with
-  `{ type?, content, kind?, to?, mentions? }`, returning `200 { id, seq, timestamp }`
+  `{ type?, content, kind?, to?, mentions?, threadParentId? }`, returning
+  `200 { id, seq, timestamp }`
   (the `SendAck` a persistent `send()` resolves with) or a `4xx { code, reason? }` (a
   `blocked_by_middleware` code carries the end-user-visible `reason` that surfaces as
   `BlockedError.reason`).
 - **History** — `GET /v1/channels/{channelId}/history`, either `?before={seq}&limit=50`
   for scrolling up, or `?from={seq}&to={seq}` for filling a detected gap. Returns
-  `{ msgs, hasMore }`; retracted messages come back as tombstoned envelopes.
+  `{ msgs, hasMore }`; retracted messages come back as tombstoned envelopes. Add
+  `?threadParentId={id}` to page one thread instead — inside a thread, `before` is a
+  `threadSeq` (the thread's own dense position), not a channel `seq`.
 - **Members** — `GET /v1/channels/{channelId}/members?cursor=...`, returning
   `{ members: [{ userId, online, claims }], cursor? }` — the wire source for
   `members()`.
+
+- **Threads** — `GET /v1/channels/{channelId}/threads?parent={id}` (empty `parent=`
+  lists root threads) or `?root={id}` for a whole branch, plus `&cursor=&limit=`.
+  Returns `{ threads, hasMore, nextCursor? }`, where each node is
+  `{ id, parentThreadId?, rootThreadId, depth, spawnSeq, spawnedBy, latestSeq, threadSeq, createdAt }`.
+  `cursor` is opaque — echo back the `nextCursor` a previous page handed you, and treat
+  its absence as the end. `depth` is 1-based: a root thread is `1`, and the cap is `8`.
 
 ## Ordering, dedup, and gap-fill
 

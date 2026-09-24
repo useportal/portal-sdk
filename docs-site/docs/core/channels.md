@@ -105,6 +105,34 @@ mentionsOnly.messages;
 mentionsOnly.subscribe(() => console.log(mentionsOnly.getSnapshot().messages.length));
 ```
 
+## Threads
+
+A message carrying `threadParentId` is a reply, and that parent id is the thread's id.
+Replies are ordinary channel messages — they're in `room.messages` like everything else —
+so a flat timeline just ignores the field:
+
+```ts
+import { Portal } from "@portalsdk/core";
+
+interface ChatMessage {
+  text: string;
+}
+
+const portal = new Portal({ apiKey: "pk_your_publishable_key" });
+const room = portal.channel<ChatMessage>("room-1");
+room.acquire();
+
+async function reply(parentMessageId: string) {
+  await room.send({ content: { text: "in thread" }, threadParentId: parentMessageId });
+}
+
+const topLevelOnly = room.messages.filter((m) => m.threadParentId === undefined);
+const thread = room.thread("msg_the_parent_id"); // a lens narrowed to one thread
+```
+
+Threads nest, and `room.threads()` enumerates the ones that exist. See
+[Threads](/core/threads) for the whole surface.
+
 ## Read state
 
 Every channel tracks a **watermark** — how far *this device* has read, independent of

@@ -409,7 +409,7 @@ export interface ThreadNode {
   parentThreadId?: string;
   /** The top-level ancestor; equals `id` on a root thread. */
   rootThreadId: string;
-  /** Nesting level; a root thread is `0`. */
+  /** Nesting level. A root thread is `1`; the platform's cap is `8`. */
   depth: number;
   /** Who sent the message the thread hangs off. */
   spawnedBy: { id: string };
